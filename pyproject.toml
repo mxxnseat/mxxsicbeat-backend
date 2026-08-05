@@ -1,0 +1,48 @@
+[project]
+name = "mxxsicbeat-backend"
+version = "0.1.0"
+description = "Beatmap generation backend for mxxsicbeat"
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic-settings>=2.7",
+    "motor>=3.6",
+    "bullmq>=2.10",
+    "aioboto3>=13.2",
+    "python-multipart>=0.0.20",
+    "structlog>=24.4",
+]
+
+[project.optional-dependencies]
+worker = [
+    "demucs>=4.0.1",
+    "librosa>=0.11.0",
+    "soundfile>=0.13",
+    "numpy",
+    "scipy",
+    "setuptools<81",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "httpx>=0.28",
+    "ruff>=0.9",
+    "mongomock-motor>=0.0.35",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# B008 (function call in argument default) fires on every FastAPI `Depends(...)`/`File(...)`
+# parameter default - that's the framework's own recommended DI pattern, not a bug.
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
