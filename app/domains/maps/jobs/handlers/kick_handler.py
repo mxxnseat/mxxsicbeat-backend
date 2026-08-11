@@ -10,19 +10,25 @@ from app.core.db import create_mongo_client, get_database
 from app.core.logging import configure_logging, get_logger
 from app.core.storage import Storage
 from app.domains.maps.configs.storage import get_maps_storage_config
-from app.domains.maps.dsp.pipeline import generate_beatmap
-from app.domains.maps.jobs.queues.queue import KICK_ONSET_QUEUE_NAME, DetectKickOnsetsJobPayload
+from app.domains.maps.dsp.kick_detector import detect_kick_onsets, has_significant_drum_energy
+from app.domains.maps.jobs.queues.queue import (
+    KICK_ONSET_QUEUE_NAME,
+    DetectKickOnsetsJobPayload,
+    KickDetectionResult,
+)
 from app.domains.maps.repositories.repository import MapRepository
 from app.domains.maps.services.job_service import MapJobService
+from app.domains.maps.services.notes_service import build_drum_notes
 from app.domains.maps.services.storage import MapsStorage
 
 logger = get_logger(__name__)
 
 
 class KickHandler:
-    """BullMQ job processor: downloads audio, runs kick-onset detection, and returns the
-    resulting notes as the job's result - the parent `beatmap_handler` reads this back via
-    `job.getChildrenValues()` once this and `midi_handler` have both completed.
+    """BullMQ job processor: downloads the drum stem stem_handler already separated out, runs
+    kick-onset detection, and returns the resulting notes as the job's result - the parent
+    `beatmap_handler` reads this back via `job.getChildrenValues()` once this and
+    `melody_handler` have both completed.
     """
 
     def __init__(self, job_service: MapJobService, maps_storage: MapsStorage) -> None:
@@ -41,24 +47,26 @@ class KickHandler:
     async def _process(self, job: Job) -> dict:
         payload = DetectKickOnsetsJobPayload.model_validate(job.data)
 
-        await self._job_service.mark_processing(payload.job_id)
-        logger.info("kick_handler.processing", job_id=payload.job_id, object_key=payload.object_key)
+        logger.info("kick_handler.processing", job_id=payload.job_id)
 
         with tempfile.TemporaryDirectory(prefix="mxxsicbeat-kick-") as tmp:
-            work_dir = Path(tmp)
-            audio_path = work_dir / payload.original_filename
+            drum_stem_path = Path(tmp) / "drums.wav"
+            original_path = Path(tmp) / payload.original_filename
+            await self._maps_storage.download(self._maps_storage.drum_key(payload.job_id), drum_stem_path)
+            await self._maps_storage.download(
+                self._maps_storage.original_key(payload.job_id, payload.original_filename), original_path
+            )
 
-            await self._maps_storage.download(payload.object_key, audio_path)
+            if not await asyncio.to_thread(has_significant_drum_energy, drum_stem_path, original_path):
+                logger.info("kick_handler.no_significant_drums", job_id=payload.job_id)
+                return KickDetectionResult(notes=[]).model_dump()
 
-            result = await asyncio.to_thread(generate_beatmap, audio_path, work_dir, payload.lane_count)
+            onset_times, onseter = await asyncio.to_thread(detect_kick_onsets, drum_stem_path)
 
-            with result.drum_stem_path.open("rb") as drum_stem:
-                await self._maps_storage.upload(self._maps_storage.drum_key(payload.job_id), drum_stem)
-            with result.melody_stem_path.open("rb") as melody_stem:
-                await self._maps_storage.upload(self._maps_storage.melody_key(payload.job_id), melody_stem)
+        notes = build_drum_notes(onset_times, onseter, payload.lane_count)
 
         logger.info("kick_handler.completed", job_id=payload.job_id)
-        return {"lane_count": result.lane_count, "duration_ms": result.duration_ms, "notes": result.notes}
+        return KickDetectionResult(notes=notes).model_dump()
 
 
 async def main() -> None:

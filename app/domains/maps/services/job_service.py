@@ -16,6 +16,8 @@ class MapJobService:
         await self._repository.mark_job_failed(job_id, error)
 
     async def finalize_beatmap(self, beatmap: NewBeatmap) -> str:
+        # TODO: Don't messup two collections in one service, 
+        # also split repositories per entity
         beatmap_id = await self._repository.insert_beatmap(beatmap)
         await self._repository.mark_job_completed(beatmap.job_id, beatmap_id)
         return beatmap_id

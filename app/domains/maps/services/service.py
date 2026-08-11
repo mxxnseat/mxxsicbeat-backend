@@ -12,7 +12,7 @@ from app.domains.maps.exceptions.exceptions import (
     MapJobNotFoundError,
     UnsupportedAudioTypeError,
 )
-from app.domains.maps.jobs.queues.queue import build_generate_beatmap_flow, get_flow_producer
+from app.domains.maps.jobs.queues.queue import build_separate_stems_job, get_flow_producer
 from app.domains.maps.repositories.repository import MapRepository, get_map_repository
 from app.domains.maps.services.storage import MapsStorage, get_maps_storage
 
@@ -55,16 +55,14 @@ class MapService:
         object_key = self._maps_storage.original_key(job_id, original_filename)
         await self._repository.set_job_object_key(job_id, object_key)
 
-        # object_key is scoped by job_id and never overwritten, so it's safe for a CDN to
-        # cache the response forever - see MapsStorageConfig.cache_control.
         await self._maps_storage.upload(object_key, BytesIO(audio_bytes))
-        flow = build_generate_beatmap_flow(
+        stem_separation_job = build_separate_stems_job(
             job_id=job_id,
             object_key=object_key,
             original_filename=original_filename,
             lane_count=resolved_lane_count,
         )
-        await self._flow_producer.add(flow)
+        await self._flow_producer.add(stem_separation_job)
 
         return MapJobCreateResponse(job_id=job_id, status="queued")
 
@@ -93,8 +91,7 @@ class MapService:
         return Beatmap(
             id=str(beatmap["_id"]),
             title=beatmap["title"],
-            lane_count=beatmap["lane_count"],
-            duration_ms=beatmap["duration_ms"],
+            duration=beatmap["duration"],
             bpm=beatmap.get("bpm"),
             notes=beatmap["notes"],
             created_at=beatmap["created_at"],

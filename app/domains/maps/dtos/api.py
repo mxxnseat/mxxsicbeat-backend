@@ -3,22 +3,30 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from app.domains.maps.dtos.notes import NoteType
+
 JobStatus = Literal["queued", "processing", "completed", "failed"]
 
 
 class BeatmapNote(BaseModel):
-    time_ms: int
+    time: int
     lane: int
     energy: float
+    duration: int | None
+    note_type: NoteType
+
+
+class BeatmapNoteGroup(BaseModel):
+    lane_count: int
+    notes: list[BeatmapNote]
 
 
 class Beatmap(BaseModel):
     id: str
     title: str
-    lane_count: int
-    duration_ms: int
+    duration: int
     bpm: float | None = None
-    notes: list[BeatmapNote]
+    notes: tuple[BeatmapNoteGroup, BeatmapNoteGroup]
     created_at: datetime
     audio_url: str | None = None
 

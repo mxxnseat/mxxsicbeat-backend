@@ -1,13 +1,21 @@
+from pathlib import Path
+
 import pytest
 from bson import ObjectId
 from pydantic import ValidationError
 
-from app.domains.maps.dsp.pipeline import GeneratedBeatmap
+from app.domains.maps.dsp.kick_onseter import KickOnseter
+from app.domains.maps.dsp.melody_extractor import ExtractedMelody, MelodyNoteEvent
+from app.domains.maps.dsp.stem_separator import SeparatedStems
 from app.domains.maps.dtos.internal import NewBeatmap
+from app.domains.maps.dtos.notes import NoteGroup
 from app.domains.maps.jobs.handlers import kick_handler as kick_handler_module
+from app.domains.maps.jobs.handlers import melody_handler as melody_handler_module
+from app.domains.maps.jobs.handlers import stem_handler as stem_handler_module
 from app.domains.maps.jobs.handlers.beatmap_handler import BeatmapHandler
 from app.domains.maps.jobs.handlers.kick_handler import KickHandler
-from app.domains.maps.jobs.handlers.midi_handler import MidiHandler
+from app.domains.maps.jobs.handlers.melody_handler import MelodyHandler
+from app.domains.maps.jobs.handlers.stem_handler import StemHandler
 from app.domains.maps.repositories.repository import MapRepository
 from app.domains.maps.services.job_service import MapJobService
 
@@ -44,46 +52,53 @@ async def _get_job(fake_db, job_id: str) -> dict:
     return await fake_db.map_jobs.find_one({"_id": ObjectId(job_id)})
 
 
-async def test_kick_handler_marks_processing_downloads_and_returns_notes(
-    fake_db, fake_storage, job_service, monkeypatch, tmp_path
+async def test_stem_handler_separates_uploads_and_enqueues_next_flow(
+    fake_db, fake_storage, fake_flow_producer, job_service, monkeypatch, tmp_path
 ):
     job_id = await _insert_job(fake_db)
     fake_storage.objects["audio/x/song.mp3"] = b"fake-audio-bytes"
 
     drum_stem_path = tmp_path / "drums.wav"
     drum_stem_path.write_bytes(b"fake-drum-bytes")
-    melody_stem_path = tmp_path / "no_drums.wav"
+    melody_stem_path = tmp_path / "no_vocals.wav"
     melody_stem_path.write_bytes(b"fake-melody-bytes")
 
-    canned = GeneratedBeatmap(
-        lane_count=2,
-        duration_ms=1000,
-        bpm=None,
-        notes=[{"time_ms": 0, "lane": 0, "energy": 1.0}],
-        drum_stem_path=drum_stem_path,
-        melody_stem_path=melody_stem_path,
-    )
-    monkeypatch.setattr(kick_handler_module, "generate_beatmap", lambda *args, **kwargs: canned)
+    canned_stems = SeparatedStems(drum_stem_path=drum_stem_path, melody_stem_path=melody_stem_path)
+    monkeypatch.setattr(stem_handler_module, "separate_stems", lambda *args, **kwargs: canned_stems)
+    monkeypatch.setattr(stem_handler_module, "track_duration", lambda *args, **kwargs: 5000)
+    monkeypatch.setattr(stem_handler_module, "detect_bpm", lambda *args, **kwargs: 120.0)
 
-    handler = KickHandler(job_service, fake_storage)
+    handler = StemHandler(job_service, fake_storage, fake_flow_producer)
     job = FakeJob(
         {"job_id": job_id, "object_key": "audio/x/song.mp3", "original_filename": "song.mp3", "lane_count": 2}
     )
 
     result = await handler(job, "token")
 
-    expected_notes = [{"time_ms": 0, "lane": 0, "energy": 1.0}]
-    assert result == {"lane_count": 2, "duration_ms": 1000, "notes": expected_notes}
+    assert result == {"job_id": job_id}
     assert (await _get_job(fake_db, job_id))["status"] == "processing"
     assert fake_storage.objects[fake_storage.drum_key(job_id)] == b"fake-drum-bytes"
     assert fake_storage.objects[fake_storage.melody_key(job_id)] == b"fake-melody-bytes"
 
+    assert len(fake_flow_producer.added_flows) == 1
+    flow = fake_flow_producer.added_flows[0]
+    assert flow["data"]["job_id"] == job_id
+    assert flow["data"]["duration"] == 5000
+    assert flow["data"]["bpm"] == 120.0
 
-async def test_kick_handler_marks_failed_and_reraises_on_error(fake_db, fake_storage, job_service):
+    children = flow["children"]
+    assert {child["queueName"] for child in children} == {"kick-onset-detection", "melody-extraction"}
+    melody_child = next(child for child in children if child["queueName"] == "melody-extraction")
+    assert melody_child["data"]["bpm"] == 120.0
+
+
+async def test_stem_handler_marks_failed_and_reraises_on_error(
+    fake_db, fake_storage, fake_flow_producer, job_service
+):
     job_id = await _insert_job(fake_db)
-    # object_key not present in fake_storage.objects -> download_to_path raises KeyError
+    # object_key not present in fake_storage.objects -> download raises KeyError
 
-    handler = KickHandler(job_service, fake_storage)
+    handler = StemHandler(job_service, fake_storage, fake_flow_producer)
     job = FakeJob(
         {"job_id": job_id, "object_key": "missing/key", "original_filename": "song.mp3", "lane_count": 2}
     )
@@ -96,15 +111,125 @@ async def test_kick_handler_marks_failed_and_reraises_on_error(fake_db, fake_sto
     assert updated["error"]
 
 
-async def test_midi_handler_marks_failed_on_invalid_payload(fake_db, job_service):
+async def test_kick_handler_downloads_drum_stem_and_returns_notes(
+    fake_db, fake_storage, job_service, monkeypatch
+):
     job_id = await _insert_job(fake_db)
-    handler = MidiHandler(job_service)
-    job = FakeJob({"job_id": job_id})  # missing required fields
+    fake_storage.objects[fake_storage.drum_key(job_id)] = b"fake-drum-bytes"
+    fake_storage.objects[fake_storage.original_key(job_id, "song.mp3")] = b"fake-original-bytes"
+
+    onseter = KickOnseter()
+    monkeypatch.setattr(kick_handler_module, "has_significant_drum_energy", lambda drums, original: True)
+    monkeypatch.setattr(kick_handler_module, "detect_kick_onsets", lambda path: ([0.0, 0.5], onseter))
+
+    handler = KickHandler(job_service, fake_storage)
+    job = FakeJob(
+        {
+            "job_id": job_id,
+            "lane_count": 2,
+            "object_key": "audio/x/song.mp3",
+            "original_filename": "song.mp3",
+        }
+    )
+
+    result = await handler(job, "token")
+
+    assert result == {
+        "notes": [
+            {"time": 0, "lane": 0, "energy": 0.0, "note_type": "drum", "duration": None},
+            {"time": 500, "lane": 1, "energy": 0.0, "note_type": "drum", "duration": None},
+        ]
+    }
+
+
+async def test_kick_handler_returns_no_notes_when_drum_stem_lacks_energy(
+    fake_db, fake_storage, job_service, monkeypatch
+):
+    """Instrumental-only tracks still get a "drums" stem out of demucs - it's a learned mask,
+    not a drum-presence classifier - but it's just separation leakage (bass bleed, artifacts)
+    rather than real hits. kick_handler should skip onset detection entirely rather than let
+    librosa's relative-threshold onset_detect flag that leakage as kicks."""
+    job_id = await _insert_job(fake_db)
+    fake_storage.objects[fake_storage.drum_key(job_id)] = b"fake-drum-bytes"
+    fake_storage.objects[fake_storage.original_key(job_id, "song.mp3")] = b"fake-original-bytes"
+
+    monkeypatch.setattr(kick_handler_module, "has_significant_drum_energy", lambda drums, original: False)
+    monkeypatch.setattr(
+        kick_handler_module,
+        "detect_kick_onsets",
+        lambda path: pytest.fail("detect_kick_onsets should be skipped when drum energy is insignificant"),
+    )
+
+    handler = KickHandler(job_service, fake_storage)
+    job = FakeJob(
+        {
+            "job_id": job_id,
+            "lane_count": 2,
+            "object_key": "audio/x/song.mp3",
+            "original_filename": "song.mp3",
+        }
+    )
+
+    result = await handler(job, "token")
+
+    assert result == {"notes": []}
+
+
+async def test_kick_handler_marks_failed_and_reraises_on_error(fake_db, fake_storage, job_service):
+    job_id = await _insert_job(fake_db)
+    # drum stem not present in fake_storage.objects -> download raises KeyError
+
+    handler = KickHandler(job_service, fake_storage)
+    job = FakeJob(
+        {
+            "job_id": job_id,
+            "lane_count": 2,
+            "object_key": "audio/x/song.mp3",
+            "original_filename": "song.mp3",
+        }
+    )
+
+    with pytest.raises(KeyError):
+        await handler(job, "token")
+
+    updated = await _get_job(fake_db, job_id)
+    assert updated["status"] == "failed"
+    assert updated["error"]
+
+
+async def test_melody_handler_marks_failed_on_invalid_payload(fake_db, fake_storage, job_service):
+    job_id = await _insert_job(fake_db)
+    handler = MelodyHandler(job_service, fake_storage)
+    job = FakeJob({"job_id": job_id})  # missing required fields (lane_count, bpm)
 
     with pytest.raises(ValidationError):
         await handler(job, "token")
 
     assert (await _get_job(fake_db, job_id))["status"] == "failed"
+
+
+async def test_melody_handler_downloads_melody_stem_and_returns_notes(
+    fake_db, fake_storage, job_service, monkeypatch
+):
+    job_id = await _insert_job(fake_db)
+    fake_storage.objects[fake_storage.melody_key(job_id)] = b"fake-melody-bytes"
+
+    canned = ExtractedMelody(
+        note_events=[MelodyNoteEvent(start_time=0.0, end_time=0.5, pitch=60, amplitude=0.8)],
+        midi_path=Path("unused.mid"),
+    )
+    monkeypatch.setattr(melody_handler_module, "extract_melody", lambda *args, **kwargs: canned)
+
+    handler = MelodyHandler(job_service, fake_storage)
+    job = FakeJob({"job_id": job_id, "lane_count": 2, "bpm": 120.0})
+
+    result = await handler(job, "token")
+
+    assert result == {
+        "notes": [
+            {"time": 0, "lane": 0, "energy": 0.8, "note_type": "melody", "duration": 500},
+        ]
+    }
 
 
 async def test_beatmap_handler_merges_kick_child_and_finalizes(fake_db, job_service):
@@ -116,14 +241,14 @@ async def test_beatmap_handler_merges_kick_child_and_finalizes(fake_db, job_serv
             "object_key": "audio/x/song.mp3",
             "original_filename": "song.mp3",
             "lane_count": 2,
+            "duration": 5000,
+            "bpm": 120.0,
         },
         children={
             "bull:kick-onset-detection:abc": {
-                "lane_count": 2,
-                "duration_ms": 5000,
-                "notes": [{"time_ms": 100, "lane": 0, "energy": 0.9}],
+                "notes": [{"time": 100, "lane": 0, "energy": 0.9, "note_type": "drum", "duration": None}],
             },
-            "bull:midi-extraction:def": {"notes": []},
+            "bull:melody-extraction:def": {"notes": []},
         },
     )
 
@@ -137,8 +262,15 @@ async def test_beatmap_handler_merges_kick_child_and_finalizes(fake_db, job_serv
     assert beatmap["title"] == "song.mp3"
     assert beatmap["object_key"] == "audio/x/song.mp3"
     assert beatmap["lane_count"] == 2
-    assert beatmap["duration_ms"] == 5000
-    assert beatmap["notes"] == [{"time_ms": 100, "lane": 0, "energy": 0.9}]
+    assert beatmap["duration"] == 5000
+    assert beatmap["bpm"] == 120.0
+    assert beatmap["notes"] == [
+        {
+            "lane_count": 2,
+            "notes": [{"time": 100, "lane": 0, "energy": 0.9, "note_type": "drum", "duration": None}],
+        },
+        {"lane_count": 2, "notes": []},
+    ]
 
 
 async def test_beatmap_handler_marks_failed_when_kick_child_missing(fake_db, job_service):
@@ -150,6 +282,8 @@ async def test_beatmap_handler_marks_failed_when_kick_child_missing(fake_db, job
             "object_key": "audio/x/song.mp3",
             "original_filename": "song.mp3",
             "lane_count": 2,
+            "duration": 5000,
+            "bpm": 120.0,
         },
         children={},
     )
@@ -167,9 +301,9 @@ async def test_map_job_service_finalize_beatmap(fake_db, job_service):
         object_key="audio/x/song.mp3",
         title="song.mp3",
         lane_count=2,
-        duration_ms=1000,
+        duration=1000,
         bpm=None,
-        notes=[],
+        notes=(NoteGroup(lane_count=2, notes=[]), NoteGroup(lane_count=2, notes=[])),
     )
 
     beatmap_id = await job_service.finalize_beatmap(beatmap)

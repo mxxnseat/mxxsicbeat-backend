@@ -7,9 +7,13 @@ from app.core.config import get_config
 from app.core.db import create_mongo_client, get_database
 from app.core.logging import configure_logging, get_logger
 from app.domains.maps.dtos.internal import NewBeatmap
+from app.domains.maps.dtos.notes import NoteGroup
 from app.domains.maps.jobs.queues.queue import (
     BEATMAP_ORCHESTRATION_QUEUE_NAME,
     KICK_ONSET_QUEUE_NAME,
+    MELODY_EXTRACTION_QUEUE_NAME,
+    KickDetectionResult,
+    MelodyExtractionResult,
     OrchestrateBeatmapJobPayload,
 )
 from app.domains.maps.repositories.repository import MapRepository
@@ -31,7 +35,7 @@ def _child_result(children: dict, queue_name: str) -> dict:
 
 class BeatmapHandler:
     """Orchestrator/root processor for the beatmap-generation flow. BullMQ only invokes this
-    once both children - `kick_handler` and `midi_handler`, which run in parallel - have
+    once both children - `kick_handler` and `melody_handler`, which run in parallel - have
     completed, so this never touches audio itself: it just merges their results and saves the
     finished beatmap.
     """
@@ -52,25 +56,31 @@ class BeatmapHandler:
         payload = OrchestrateBeatmapJobPayload.model_validate(job.data)
 
         children = await job.getChildrenValues()
-        kick_result = _child_result(children, KICK_ONSET_QUEUE_NAME)
-        # midi_result = _child_result(children, MIDI_EXTRACTION_QUEUE_NAME) - always {"notes": []}
-        # for now; reserved as the merge point once midi_handler does real extraction.
+        kick_result = KickDetectionResult.model_validate(_child_result(children, KICK_ONSET_QUEUE_NAME))
+        melody_result = MelodyExtractionResult.model_validate(_child_result(children, MELODY_EXTRACTION_QUEUE_NAME))
 
         new_beatmap = NewBeatmap(
             job_id=payload.job_id,
             object_key=payload.object_key,
             title=payload.original_filename,
-            lane_count=kick_result["lane_count"],
-            duration_ms=kick_result["duration_ms"],
-            bpm=None,
-            notes=kick_result["notes"],
+            duration=payload.duration,
+            bpm=payload.bpm,
+            notes=self.generate_notes(payload.lane_count, kick_result, melody_result),
         )
         beatmap_id = await self._job_service.finalize_beatmap(new_beatmap)
         logger.info("beatmap_handler.completed", job_id=payload.job_id, beatmap_id=beatmap_id)
         return {"beatmap_id": beatmap_id}
 
+    def generate_notes(
+        self, lane_count: int, kick_result: KickDetectionResult, melody_result: MelodyExtractionResult
+    ) -> tuple[NoteGroup, NoteGroup]:
+        return (
+            NoteGroup(lane_count=lane_count, notes=list(kick_result.notes)),
+            NoteGroup(lane_count=lane_count, notes=list(melody_result.notes)),
+        )
 
 async def main() -> None:
+
     config = get_config()
     configure_logging(config.log_level)
 

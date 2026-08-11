@@ -80,10 +80,9 @@ class MapRepository:
                 "job_id": beatmap.job_id,
                 "object_key": beatmap.object_key,
                 "title": beatmap.title,
-                "lane_count": beatmap.lane_count,
-                "duration_ms": beatmap.duration_ms,
+                "duration": beatmap.duration,
                 "bpm": beatmap.bpm,
-                "notes": beatmap.notes,
+                "notes": [group.model_dump() for group in beatmap.notes],
                 "created_at": datetime.now(UTC),
             }
         )

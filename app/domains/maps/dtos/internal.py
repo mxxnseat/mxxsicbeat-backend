@@ -1,5 +1,7 @@
 from dataclasses import dataclass
 
+from app.domains.maps.dtos.notes import NoteGroup
+
 
 @dataclass(frozen=True, slots=True)
 class NewMapJob:
@@ -13,7 +15,6 @@ class NewBeatmap:
     job_id: str
     object_key: str
     title: str
-    lane_count: int
-    duration_ms: int
+    duration: int
     bpm: float | None
-    notes: list[dict]
+    notes: tuple[NoteGroup, NoteGroup]

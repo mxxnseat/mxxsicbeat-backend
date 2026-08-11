@@ -24,17 +24,11 @@ async def test_create_map_job_returns_202_and_enqueues(client, fake_flow_produce
 
     assert len(fake_flow_producer.added_flows) == 1
     flow = fake_flow_producer.added_flows[0]
+    assert flow["queueName"] == "stem-separation"
+    assert "children" not in flow
     assert flow["data"]["job_id"] == body["job_id"]
     assert flow["data"]["lane_count"] == 2
-
-    children = flow["children"]
-    assert {child["queueName"] for child in children} == {"kick-onset-detection", "midi-extraction"}
-    kick_child = next(child for child in children if child["queueName"] == "kick-onset-detection")
-    assert kick_child["data"]["job_id"] == body["job_id"]
-    assert kick_child["data"]["lane_count"] == 2
-    assert kick_child["data"]["object_key"] in fake_storage.objects
-    assert all(child["opts"]["failParentOnFailure"] is True for child in children)
-    assert flow["data"]["object_key"] == kick_child["data"]["object_key"]
+    assert flow["data"]["object_key"] in fake_storage.objects
 
 
 async def test_create_map_job_rejects_unsupported_content_type(client):
@@ -100,9 +94,15 @@ async def test_job_status_and_beatmap_round_trip(client, fake_db):
             "job_id": str(job_result.inserted_id),
             "title": "song.mp3",
             "lane_count": 2,
-            "duration_ms": 180000,
+            "duration": 180000,
             "bpm": None,
-            "notes": [{"time_ms": 1000, "lane": 0, "energy": 0.5}],
+            "notes": [
+                {
+                    "lane_count": 2,
+                    "notes": [{"time": 1000, "lane": 0, "energy": 0.5, "duration": None, "note_type": "drum"}],
+                },
+                {"lane_count": 2, "notes": []},
+            ],
             "created_at": now,
         }
     )
@@ -123,7 +123,13 @@ async def test_job_status_and_beatmap_round_trip(client, fake_db):
     beatmap_body = beatmap_response.json()
     assert beatmap_body["id"] == beatmap_id
     assert beatmap_body["lane_count"] == 2
-    assert beatmap_body["notes"] == [{"time_ms": 1000, "lane": 0, "energy": 0.5}]
+    assert beatmap_body["notes"] == [
+        {
+            "lane_count": 2,
+            "notes": [{"time": 1000, "lane": 0, "energy": 0.5, "duration": None, "note_type": "drum"}],
+        },
+        {"lane_count": 2, "notes": []},
+    ]
     # no MINIO_PUBLIC_BASE_URL configured in test_config, so no CDN URL to hand back
     assert beatmap_body["audio_url"] is None
 
@@ -137,9 +143,9 @@ async def test_get_beatmap_returns_audio_url_when_cdn_configured(client, fake_db
             "object_key": "job-1/original/song.mp3",
             "title": "song.mp3",
             "lane_count": 2,
-            "duration_ms": 180000,
+            "duration": 180000,
             "bpm": None,
-            "notes": [],
+            "notes": [{"lane_count": 2, "notes": []}, {"lane_count": 2, "notes": []}],
             "created_at": now,
         }
     )
@@ -156,9 +162,9 @@ async def test_list_beatmaps_returns_newest_first(client, fake_db):
             "job_id": "job-1",
             "title": "older.mp3",
             "lane_count": 2,
-            "duration_ms": 100000,
+            "duration": 100000,
             "bpm": None,
-            "notes": [],
+            "notes": [{"lane_count": 2, "notes": []}, {"lane_count": 2, "notes": []}],
             "created_at": datetime(2026, 1, 1, tzinfo=UTC),
         }
     )
@@ -167,9 +173,9 @@ async def test_list_beatmaps_returns_newest_first(client, fake_db):
             "job_id": "job-2",
             "title": "newer.mp3",
             "lane_count": 2,
-            "duration_ms": 200000,
+            "duration": 200000,
             "bpm": None,
-            "notes": [],
+            "notes": [{"lane_count": 2, "notes": []}, {"lane_count": 2, "notes": []}],
             "created_at": datetime(2026, 2, 1, tzinfo=UTC),
         }
     )

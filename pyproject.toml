@@ -5,6 +5,7 @@ description = "Beatmap generation backend for mxxsicbeat"
 readme = "README.md"
 requires-python = ">=3.11,<3.12"
 dependencies = [
+    "basic-pitch[tf]>=0.4.0",
     "fastapi>=0.115",
     "uvicorn[standard]>=0.34",
     "pydantic-settings>=2.7",
@@ -14,6 +15,13 @@ dependencies = [
     "python-multipart>=0.0.20",
     "structlog>=24.4",
 ]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/node_modules", "**/__pycache__", "tests/fixtures"]
+typeCheckingMode = "basic"  # or "strict", "standard", "off"
+pythonVersion = "3.12"
+reportMissingImports = true
 
 [project.optional-dependencies]
 worker = [
@@ -32,6 +40,7 @@ dev = [
     "httpx>=0.28",
     "ruff>=0.9",
     "mongomock-motor>=0.0.35",
+    "pyright>=1.1.411",
 ]
 
 [tool.ruff]

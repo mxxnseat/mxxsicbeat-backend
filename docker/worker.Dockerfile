@@ -24,7 +24,8 @@ COPY --from=builder /srv/app ./app
 
 ENV PATH="/srv/.venv/bin:$PATH"
 
-# This image is shared by all three job handler processes (kick_handler, midi_handler,
-# beatmap_handler) - the module to run is supplied as the container's command, e.g.:
+# This image is shared by all four job handler processes (stem_handler, kick_handler,
+# melody_handler, beatmap_handler) - the module to run is supplied as the container's command,
+# e.g.:
 #   python -m app.domains.maps.jobs.handlers.kick_handler
 CMD ["python", "-m", "app.domains.maps.jobs.handlers.kick_handler"]
