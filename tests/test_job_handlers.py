@@ -20,9 +20,17 @@ from app.domains.maps.services.notes_service import calculate_melody_combo
 
 
 class FakeJob:
-    def __init__(self, data: dict, children: dict | None = None) -> None:
+    def __init__(
+        self,
+        data: dict,
+        children: dict | None = None,
+        opts: dict | None = None,
+        attempts_made: int = 0,
+    ) -> None:
         self.data = data
         self._children = children or {}
+        self.opts = opts if opts is not None else {}
+        self.attemptsMade = attempts_made
 
     async def getChildrenValues(self) -> dict:
         return self._children
@@ -95,7 +103,6 @@ async def test_stem_handler_marks_failed_and_reraises_on_error(
     fake_db, fake_storage, fake_flow_producer, job_service
 ):
     job_id = await _insert_job(fake_db)
-    # object_key not present in fake_storage.objects -> download raises KeyError
 
     handler = StemHandler(job_service, fake_storage, fake_flow_producer)
     job = FakeJob(
@@ -108,6 +115,26 @@ async def test_stem_handler_marks_failed_and_reraises_on_error(
     updated = await _get_job(fake_db, job_id)
     assert updated["status"] == "failed"
     assert updated["error"]
+
+
+async def test_stem_handler_does_not_mark_failed_when_retries_remain(
+    fake_db, fake_storage, fake_flow_producer, job_service
+):
+    job_id = await _insert_job(fake_db)
+
+    handler = StemHandler(job_service, fake_storage, fake_flow_producer)
+    job = FakeJob(
+        {"job_id": job_id, "object_key": "missing/key", "original_filename": "song.mp3", "lane_count": 2},
+        opts={"attempts": 3},
+        attempts_made=0,
+    )
+
+    with pytest.raises(KeyError):
+        await handler(job, "token")
+
+    updated = await _get_job(fake_db, job_id)
+    assert updated["status"] == "processing"
+    assert updated["error"] is None
 
 
 async def test_kick_handler_downloads_drum_stem_and_returns_notes(
@@ -144,10 +171,6 @@ async def test_kick_handler_downloads_drum_stem_and_returns_notes(
 async def test_kick_handler_returns_no_notes_when_drum_stem_lacks_energy(
     fake_db, fake_storage, job_service, monkeypatch
 ):
-    """Instrumental-only tracks still get a "drums" stem out of demucs - it's a learned mask,
-    not a drum-presence classifier - but it's just separation leakage (bass bleed, artifacts)
-    rather than real hits. kick_handler should skip onset detection entirely rather than let
-    librosa's relative-threshold onset_detect flag that leakage as kicks."""
     job_id = await _insert_job(fake_db)
     fake_storage.objects[fake_storage.drum_key(job_id)] = b"fake-drum-bytes"
     fake_storage.objects[fake_storage.original_key(job_id, "song.mp3")] = b"fake-original-bytes"
@@ -176,7 +199,6 @@ async def test_kick_handler_returns_no_notes_when_drum_stem_lacks_energy(
 
 async def test_kick_handler_marks_failed_and_reraises_on_error(fake_db, fake_storage, job_service):
     job_id = await _insert_job(fake_db)
-    # drum stem not present in fake_storage.objects -> download raises KeyError
 
     handler = KickHandler(job_service, fake_storage)
     job = FakeJob(
@@ -199,7 +221,7 @@ async def test_kick_handler_marks_failed_and_reraises_on_error(fake_db, fake_sto
 async def test_melody_handler_marks_failed_on_invalid_payload(fake_db, fake_storage, job_service):
     job_id = await _insert_job(fake_db)
     handler = MelodyHandler(job_service, fake_storage)
-    job = FakeJob({"job_id": job_id})  # missing required fields (lane_count, bpm)
+    job = FakeJob({"job_id": job_id})
 
     with pytest.raises(ValidationError):
         await handler(job, "token")

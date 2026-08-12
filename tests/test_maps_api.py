@@ -115,7 +115,6 @@ async def test_job_status_and_beatmap_round_trip(
     beatmap_body = beatmap_response.json()
     assert beatmap_body["id"] == beatmap_id
     assert beatmap_body["notes"] == notes
-    # no MINIO_PUBLIC_BASE_URL configured in test_config, so no CDN URL to hand back
     assert beatmap_body["audio_url"] is None
 
 

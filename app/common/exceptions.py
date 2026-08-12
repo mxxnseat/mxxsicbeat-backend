@@ -3,8 +3,6 @@ from fastapi.responses import JSONResponse
 
 
 class AppError(Exception):
-    """Base class for application errors that map to a specific HTTP response."""
-
     status_code: int = status.HTTP_500_INTERNAL_SERVER_ERROR
     code: str = "internal_error"
 

@@ -2,8 +2,6 @@ from typing import Any
 
 
 def make_note(**overrides: Any) -> dict:
-    """A single note as it's stored in Mongo / returned over the API - drum-shaped by default
-    (no duration, combo 1); pass note_type="melody" + duration to get a melody-shaped one."""
     note = {
         "time": 1000,
         "lane": 0,

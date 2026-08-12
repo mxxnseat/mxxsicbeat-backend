@@ -13,11 +13,6 @@ Processor = Callable[[Job, str], Awaitable[dict]]
 
 
 class WorkerRuntime:
-    """Owns a single BullMQ `Worker`'s lifecycle for a queue + processor pair. Has no knowledge
-    of Mongo, repositories, or storage - each handler process builds its own dependencies and
-    hands this the finished processor plus whatever cleanup it needs on shutdown, so the same
-    runtime is reused unchanged across every handler process."""
-
     def __init__(
         self,
         config: Config,

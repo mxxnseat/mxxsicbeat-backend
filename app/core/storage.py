@@ -9,16 +9,6 @@ from app.core.config import Config
 
 
 class Storage:
-    """Thin async wrapper around an S3-compatible (MinIO) client. Bucket-agnostic - every
-    method takes the bucket as a parameter, so a single instance can be shared across domains
-    that each own their own bucket/prefix conventions (see e.g.
-    `app.domains.maps.services.storage.MapsStorage`).
-
-    Each operation opens its own aioboto3 client rather than holding one open for the process
-    lifetime - that's the pattern aioboto3 itself recommends, since the underlying aiohttp
-    session is tied to a single `async with` block.
-    """
-
     def __init__(self, config: Config) -> None:
         self._config = config
         self._session = aioboto3.Session()
@@ -37,7 +27,6 @@ class Storage:
             try:
                 await s3.head_bucket(Bucket=bucket)
             except ClientError:
-                # TODO: Remove it future and move infrastracture to terraform
                 await s3.create_bucket(Bucket=bucket)
 
     async def upload_fileobj(
@@ -62,5 +51,4 @@ class Storage:
 
 
 def get_storage(request: Request) -> Storage:
-    """FastAPI dependency: the Storage instance bound to this app instance's lifespan."""
     return request.app.state.storage

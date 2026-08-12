@@ -16,9 +16,6 @@ def _demucs_two_stems(two_stems: str, audio_path: Path, output_dir: Path) -> Pat
 
 
 def separate_stems(audio_path: Path, work_dir: Path) -> SeparatedStems:
-    """Two-stage demucs separation: first split off drums, then split vocals out of what's left
-    (`no_drums.wav`) so only the instrumental remainder - drums and vocals both removed - stands
-    in as the "melody" stem. The isolated vocal stem itself is discarded."""
     drum_stem_dir = _demucs_two_stems("drums", audio_path, work_dir)
     no_drums_path = drum_stem_dir / "no_drums.wav"
 

@@ -9,10 +9,6 @@ from app.domains.maps.configs.storage import MapsStorageConfig, get_maps_storage
 
 
 class MapsStorage:
-    """Facade over the generic `Storage` client, bound to the maps domain's bucket and key
-    layout. Callers only ever pass a key and a file object - bucket, content type (inferred
-    from the key's extension) and cache control all come from `MapsStorageConfig`."""
-
     def __init__(self, storage: Storage, config: MapsStorageConfig) -> None:
         self._storage = storage
         self._config = config
@@ -53,6 +49,4 @@ def get_maps_storage(
     storage: Storage = Depends(get_storage),
     config: MapsStorageConfig = Depends(get_maps_storage_config),
 ) -> MapsStorage:
-    """FastAPI dependency: a MapsStorage facade assembled from this request's injected
-    dependencies."""
     return MapsStorage(storage, config)

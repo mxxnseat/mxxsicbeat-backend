@@ -4,6 +4,7 @@ from pathlib import Path
 
 from bullmq import FlowProducer, Job
 
+from app.common.job_retry import is_final_attempt
 from app.common.worker_runtime import WorkerRuntime
 from app.core.config import get_config
 from app.core.db import create_mongo_client, get_database
@@ -26,13 +27,6 @@ logger = get_logger(__name__)
 
 
 class StemHandler:
-    """BullMQ job processor: downloads the original upload and runs two-stage demucs separation
-    (drums first, then vocals out of what's left), uploading the resulting drum/melody stems.
-    On success it dynamically enqueues the second-phase flow - kick_handler and melody_handler
-    in parallel, gated by beatmap_handler - since BullMQ jobs can only have a single parent and
-    both of those need this job's output, they can't be modeled as its children directly.
-    """
-
     def __init__(
         self, job_service: MapJobService, maps_storage: MapsStorage, flow_producer: FlowProducer
     ) -> None:
@@ -45,8 +39,13 @@ class StemHandler:
             return await self._process(job)
         except Exception as exc:
             job_id = job.data.get("job_id")
-            logger.error("stem_handler.failed", job_id=job_id, error=str(exc))
-            await self._job_service.mark_failed(job_id, str(exc))
+            if is_final_attempt(job):
+                logger.error("stem_handler.failed", job_id=job_id, error=str(exc))
+                await self._job_service.mark_failed(job_id, str(exc))
+            else:
+                logger.warning(
+                    "stem_handler.retrying", job_id=job_id, error=str(exc), attempts_made=job.attemptsMade
+                )
             raise
 
     async def _process(self, job: Job) -> dict:
@@ -61,7 +60,6 @@ class StemHandler:
 
             await self._maps_storage.download(payload.object_key, audio_path)
 
-            # TODO: Don't read the same file twice in track_duration and detect_bpm
             duration = await asyncio.to_thread(track_duration, audio_path)
             bpm = await asyncio.to_thread(detect_bpm, audio_path)
             stems = await asyncio.to_thread(separate_stems, audio_path, work_dir)

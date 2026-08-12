@@ -1,4 +1,3 @@
-"""Indexes backing job-status polling and beatmap lookup by job."""
 
 from motor.motor_asyncio import AsyncIOMotorDatabase
 

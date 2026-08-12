@@ -13,5 +13,4 @@ def get_database(client: AsyncIOMotorClient, config: Config) -> AsyncIOMotorData
 
 
 def get_db(request: Request) -> AsyncIOMotorDatabase:
-    """FastAPI dependency: the Mongo database bound to this app instance's lifespan."""
     return request.app.state.db

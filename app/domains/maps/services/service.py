@@ -18,8 +18,6 @@ from app.domains.maps.services.storage import MapsStorage, get_maps_storage
 
 
 class MapService:
-    """Orchestrates map-job creation and lookup across Mongo, MinIO, and the job flow producer."""
-
     def __init__(
         self,
         repository: MapRepository,
@@ -105,5 +103,4 @@ def get_map_service(
     flow_producer: FlowProducer = Depends(get_flow_producer),
     config: Config = Depends(get_config),
 ) -> MapService:
-    """FastAPI dependency: a MapService assembled from this request's injected dependencies."""
     return MapService(repository, maps_storage, flow_producer, config)

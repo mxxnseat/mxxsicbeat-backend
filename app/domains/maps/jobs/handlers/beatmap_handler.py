@@ -2,6 +2,7 @@ import asyncio
 
 from bullmq import Job
 
+from app.common.job_retry import is_final_attempt
 from app.common.worker_runtime import WorkerRuntime
 from app.core.config import get_config
 from app.core.db import create_mongo_client, get_database
@@ -23,10 +24,6 @@ logger = get_logger(__name__)
 
 
 def _child_result(children: dict, queue_name: str) -> dict:
-    """`Job.getChildrenValues()` returns a dict keyed by `<prefix>:<queueName>:<jobId>` mapping
-    to each child's JSON-decoded return value - match by queue name rather than assuming key
-    order or exact format."""
-
     for key, value in children.items():
         if queue_name in key:
             return value
@@ -34,12 +31,6 @@ def _child_result(children: dict, queue_name: str) -> dict:
 
 
 class BeatmapHandler:
-    """Orchestrator/root processor for the beatmap-generation flow. BullMQ only invokes this
-    once both children - `kick_handler` and `melody_handler`, which run in parallel - have
-    completed, so this never touches audio itself: it just merges their results and saves the
-    finished beatmap.
-    """
-
     def __init__(self, job_service: MapJobService) -> None:
         self._job_service = job_service
 
@@ -48,8 +39,13 @@ class BeatmapHandler:
         try:
             return await self._process(job)
         except Exception as exc:
-            logger.error("beatmap_handler.failed", job_id=job_id, error=str(exc))
-            await self._job_service.mark_failed(job_id, str(exc))
+            if is_final_attempt(job):
+                logger.error("beatmap_handler.failed", job_id=job_id, error=str(exc))
+                await self._job_service.mark_failed(job_id, str(exc))
+            else:
+                logger.warning(
+                    "beatmap_handler.retrying", job_id=job_id, error=str(exc), attempts_made=job.attemptsMade
+                )
             raise
 
     async def _process(self, job: Job) -> dict:
@@ -80,7 +76,6 @@ class BeatmapHandler:
         )
 
 async def main() -> None:
-
     config = get_config()
     configure_logging(config.log_level)
 

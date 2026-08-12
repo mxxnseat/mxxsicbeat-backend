@@ -33,8 +33,6 @@ def _sine(freq: float, duration: float, sr: int = _SR, amplitude: float = 0.8) -
 def _tone(
     freq: float, duration: float, sr: int = _SR, amplitude: float = 0.8, fade: float = 0.01
 ) -> np.ndarray:
-    """A sine tone with a short fade in/out, so silencing it doesn't itself read as a broadband
-    click (a spurious onset) to the detector under test."""
     signal = _sine(freq, duration, sr=sr, amplitude=amplitude)
     fade_samples = int(sr * fade)
     envelope = np.ones_like(signal)
@@ -88,8 +86,6 @@ def test_build_drum_notes_rounds_up_above_half():
 
 def test_build_drum_notes_rounds_exact_half_to_even():
     onseter = _onseter_with_odf([1.0, 1.0])
-    # both land exactly on a .5ms boundary (1234.5 and 1233.5) - round() rounds half-to-even,
-    # so both land on 1234 rather than the naive "always round half up" result of 1235/1234.
     notes = build_drum_notes([1.2345, 1.2335], onseter, lane_count=1)
 
     assert [note.time for note in notes] == [1234, 1234]
@@ -105,14 +101,14 @@ def test_spectral_flux_is_zero_when_energy_is_constant():
 
 def test_spectral_flux_spikes_on_energy_jump():
     S = np.ones((4, 6))
-    S[:, 3] = 20.0  # sudden loud frame
+    S[:, 3] = 20.0
 
     flux = _spectral_flux(S)
 
-    assert flux[0] == 0.0  # first frame has nothing to diff against
+    assert flux[0] == 0.0
     assert flux[3] > 0.0
     assert flux[3] > flux[1]
-    assert flux[4] == 0.0  # energy drop (frame 4 quieter than frame 3) is rectified away
+    assert flux[4] == 0.0
 
 
 def test_pick_onsets_detects_impulses_above_local_noise_floor():
@@ -137,7 +133,7 @@ def test_pick_onsets_ignores_flat_novelty():
 def test_estimate_offsets_ends_when_energy_decays_below_threshold():
     n_bins, n_frames = 8, 40
     S = np.full((n_bins, n_frames), 5.0)
-    S[:, 10:] = 0.01  # energy collapses starting at frame 10
+    S[:, 10:] = 0.01
 
     offsets = _estimate_offsets(S, _SR, np.array([0.0]), hop_length=_HOP_LENGTH)
 
@@ -147,7 +143,7 @@ def test_estimate_offsets_ends_when_energy_decays_below_threshold():
 
 def test_estimate_offsets_caps_at_next_onset():
     n_bins, n_frames = 8, 100
-    S = np.full((n_bins, n_frames), 5.0)  # energy never decays
+    S = np.full((n_bins, n_frames), 5.0)
 
     onset_times = np.array([0.0, 0.3])
     offsets = _estimate_offsets(S, _SR, onset_times, hop_length=_HOP_LENGTH)
@@ -197,11 +193,6 @@ def test_spectral_centroid_lanes_single_lane_puts_everything_on_lane_zero():
 
 
 def test_build_melody_notes_detects_notes_in_different_lanes():
-    # low.wav (0-300ms) and high.wav (400-700ms) are far enough apart in both time and pitch
-    # that regardless of exactly how many onsets the real detector fires within each tone, every
-    # onset inside the low-tone region should land in lane 0 and every onset inside the
-    # high-tone region should land in lane 1 - 350ms is the midpoint of the silence gap between
-    # them.
     silence = np.zeros(int(_SR * 0.1))
     low = _tone(220.0, 0.3)
     high = _tone(1760.0, 0.3)

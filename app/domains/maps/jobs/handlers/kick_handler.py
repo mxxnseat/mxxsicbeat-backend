@@ -4,6 +4,7 @@ from pathlib import Path
 
 from bullmq import Job
 
+from app.common.job_retry import is_final_attempt
 from app.common.worker_runtime import WorkerRuntime
 from app.core.config import get_config
 from app.core.db import create_mongo_client, get_database
@@ -25,12 +26,6 @@ logger = get_logger(__name__)
 
 
 class KickHandler:
-    """BullMQ job processor: downloads the drum stem stem_handler already separated out, runs
-    kick-onset detection, and returns the resulting notes as the job's result - the parent
-    `beatmap_handler` reads this back via `job.getChildrenValues()` once this and
-    `melody_handler` have both completed.
-    """
-
     def __init__(self, job_service: MapJobService, maps_storage: MapsStorage) -> None:
         self._job_service = job_service
         self._maps_storage = maps_storage
@@ -40,8 +35,13 @@ class KickHandler:
             return await self._process(job)
         except Exception as exc:
             job_id = job.data.get("job_id")
-            logger.error("kick_handler.failed", job_id=job_id, error=str(exc))
-            await self._job_service.mark_failed(job_id, str(exc))
+            if is_final_attempt(job):
+                logger.error("kick_handler.failed", job_id=job_id, error=str(exc))
+                await self._job_service.mark_failed(job_id, str(exc))
+            else:
+                logger.warning(
+                    "kick_handler.retrying", job_id=job_id, error=str(exc), attempts_made=job.attemptsMade
+                )
             raise
 
     async def _process(self, job: Job) -> dict:

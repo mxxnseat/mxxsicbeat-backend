@@ -1,15 +1,3 @@
-"""Applies pending MongoDB migrations.
-
-Each migration is a module in this package named `NNNN_description.py` exposing an
-async `up(db)` function. Applied migrations are recorded by filename stem in the
-`_migrations` collection so re-running this is a no-op once everything is applied.
-
-Migrations run forward-only - there's no `down()`. To reverse one, write a new migration
-that undoes it.
-
-Usage:
-    uv run python -m migrations.runner
-"""
 
 import asyncio
 import importlib.util
@@ -41,7 +29,6 @@ def _load(path: Path) -> ModuleType:
 
 
 async def run_migrations(db: AsyncIOMotorDatabase) -> list[str]:
-    """Applies every not-yet-recorded migration in filename order, returning the names applied."""
     already_applied = {doc["_id"] async for doc in db[MIGRATIONS_COLLECTION].find({}, {"_id": 1})}
 
     applied_now = []

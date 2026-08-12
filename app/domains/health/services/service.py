@@ -7,8 +7,6 @@ from app.core.redis_client import get_redis
 
 
 class HealthService:
-    """Checks whether this instance's Mongo and Redis connections are actually reachable."""
-
     def __init__(self, db: AsyncIOMotorDatabase, redis_client: redis.Redis) -> None:
         self._db = db
         self._redis_client = redis_client

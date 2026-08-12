@@ -17,8 +17,6 @@ def to_object_id(value: str) -> ObjectId | None:
 
 
 class MapRepository:
-    """Raw Motor access to the `map_jobs` and `beatmaps` collections."""
-
     def __init__(self, db: AsyncIOMotorDatabase) -> None:
         self._db = db
 
@@ -100,5 +98,4 @@ class MapRepository:
 
 
 def get_map_repository(db: AsyncIOMotorDatabase = Depends(get_db)) -> MapRepository:
-    """FastAPI dependency: a MapRepository bound to this request's Mongo database."""
     return MapRepository(db)

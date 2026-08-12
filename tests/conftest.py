@@ -15,9 +15,6 @@ from tests.fixtures.notes import make_note, make_note_group
 
 
 class FakeStorage:
-    """Stands in for MapsStorage - same key + fileobj surface, backed by an in-memory dict
-    instead of MinIO."""
-
     def __init__(self, config: MapsStorageConfig | None = None) -> None:
         self.objects: dict[str, bytes] = {}
         self._config = config or MapsStorageConfig(_env_file=None)

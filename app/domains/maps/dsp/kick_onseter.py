@@ -4,20 +4,6 @@ from scipy.signal import butter, sosfiltfilt
 
 
 class KickOnseter:
-    """Kick-drum onset detector: isolate the kick's frequency range with a
-    low-pass filter, then hand off to librosa's onset detector.
-
-    Several iterations of a hand-rolled adaptive-threshold detector (STFT
-    spectral flux, then a time-domain envelope follower) kept trading one
-    failure mode for another across different tempos - a fix that made a
-    fast blast-beat section detectable badly over-triggered on a slower
-    track (shoulder-bumps on a kick's own decay, snare/hihat bleed), and
-    vice versa. librosa's onset_detect is a mature, widely-validated
-    implementation; band-limiting to the kick's frequency range first still
-    does the job of separating kick from the rest of the kit within the
-    isolated drum stem.
-    """
-
     def __init__(
         self,
         sample_rate: int = 44100,
@@ -55,8 +41,6 @@ class KickOnseter:
         return list(librosa.frames_to_time(onset_frames, sr=self.sample_rate, hop_length=self.hop_length))
 
     def strength_at(self, onset_time: float) -> float:
-        """Normalized (0-1) onset detection function value at the given time, for use as a
-        per-note energy hint. Returns 0.0 if onsets haven't been detected yet or the ODF is flat."""
         if self.odf is None or self.frame_rate is None or len(self.odf) == 0:
             return 0.0
         frame = int(round(onset_time * self.frame_rate))
