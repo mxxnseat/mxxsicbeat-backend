@@ -1,32 +1,25 @@
-import bisect
-
+import librosa
 import numpy as np
+import scipy.ndimage
 
 from app.domains.maps.dsp.kick_onseter import KickOnseter
-from app.domains.maps.dsp.melody_extractor import MelodyNoteEvent
 from app.domains.maps.dtos.notes import Note, NoteType
 
-# Salience = amplitude scaled by held duration, capped so a long sustain doesn't keep gaining
-# weight past what already reads as "clearly the important note" - without the cap, raw duration
-# would dominate the score and let a slow, uninteresting sustain outrank a short, loud, on-beat hit.
-_SALIENCE_DURATION_CAP_S = 0.3
+_HOP_LENGTH = 512
+_N_FFT = 2048
 
-# A note within this many semitones of a lane-band boundary keeps the previous note's lane
-# instead of re-deciding from scratch - basic-pitch's pitch estimate is noisy enough that notes
-# hovering right at the boundary would otherwise flip lanes independent of any real melodic
-# movement.
-_LANE_HYSTERESIS_SEMITONES = 1
+# Onset picking: a frame counts as an onset once it clears its own local noise floor (rolling
+# median + this many robust std-devs over `_ONSET_BASELINE_WINDOW_S`), not a fixed fraction of
+# the loudest moment in the whole clip - see `_pick_onsets`.
+_ONSET_BASELINE_WINDOW_S = 0.5
+_ONSET_Z_THRESH = 2.5
+_ONSET_WAIT_S = 0.1
 
-# Max one kept note per lane per this fraction of a beat, derived from bpm - caps density to
-# something tappable and collapses basic-pitch's over-transcription (grace notes, vibrato
-# artifacts, chord notes sharing a band) down to the single most salient note in each slot.
-_SUPPRESSION_WINDOW_BEAT_FRACTION = 8
-
-# Minimum time a held note's end must leave before the next note in the same lane starts, so a
-# player can release and catch that next note rather than the hold running straight into it.
-# Density suppression alone doesn't guarantee this - it only caps how many onsets survive per
-# window, not how long a surviving note's hold eats into the next slot.
-_MIN_LANE_GAP_S = 0.2
+# Offset estimation: walk energy forward from each onset until it decays this many dB below the
+# onset's own level, capped to `_OFFSET_MAX_DUR_S` - see `_estimate_offsets`.
+_OFFSET_DECAY_DB = 20.0
+_OFFSET_MIN_DUR_S = 0.05
+_OFFSET_MAX_DUR_S = 4.0
 
 
 def build_drum_notes(onset_times: list[float], onseter: KickOnseter, lane_count: int) -> list[Note]:
@@ -42,112 +35,160 @@ def build_drum_notes(onset_times: list[float], onseter: KickOnseter, lane_count:
             lane=index % lane_count,
             energy=onseter.strength_at(onset_time),
             note_type=NoteType.DRUM,
+            combo=1
         )
         for index, onset_time in enumerate(onset_times)
     ]
 
 
-def _salience(event: MelodyNoteEvent) -> float:
-    duration = event.end_time - event.start_time
-    return event.amplitude * min(duration, _SALIENCE_DURATION_CAP_S) / _SALIENCE_DURATION_CAP_S
+def _spectral_flux(S: np.ndarray) -> np.ndarray:
+    """Textbook spectral flux, computed by hand instead of relying on
+    librosa.onset.onset_strength's mel-filterbank default: log-compress the STFT magnitude (dB)
+    so quiet-but-real spectral changes aren't drowned out by whichever bin is loudest, then
+    half-wave rectify the frame-to-frame difference and sum across frequency bins. Full linear
+    -frequency STFT bins, not a mel filterbank, so sub-bass and treble content isn't pre-blurred
+    together before we look for transients."""
+    S_db = librosa.amplitude_to_db(S, ref=np.max)
+    diff = np.diff(S_db, axis=1, prepend=S_db[:, :1])
+    return np.sum(np.maximum(diff, 0.0), axis=0)
 
 
-def _lane_boundaries(pitches: list[int], lane_count: int) -> list[float]:
-    """`lane_count - 1` quantile cut points splitting `pitches` into `lane_count` equal-sized
-    bands (lowest pitches in lane 0), so lane density stays balanced regardless of where the
-    melody's register sits - a fixed pitch cutoff would badly mis-split a bass-heavy vs a
-    soprano-heavy track."""
-    if lane_count <= 1 or not pitches:
-        return []
-    quantiles = [band / lane_count for band in range(1, lane_count)]
-    return list(np.quantile(pitches, quantiles))
+def _pick_onsets(novelty: np.ndarray, sr: int, hop_length: int = _HOP_LENGTH) -> np.ndarray:
+    """A fixed `delta` on librosa's globally-normalized envelope is fragile:
+    onset_detect(normalize=True) rescales the *whole clip* by its single loudest frame before
+    comparing against delta, so one big transient anywhere compresses every other section - real
+    onsets in quieter passages stop clearing a fixed threshold.
+
+    Instead, threshold each frame of `novelty` against its own local noise floor: a rolling
+    median (baseline) plus `_ONSET_Z_THRESH` robust local deviations (MAD scaled to be
+    std-like, so it behaves like a dB-ish SNR margin) over a `_ONSET_BASELINE_WINDOW_S` window.
+    A frame only has to stand out from its immediate neighborhood, not from the loudest moment
+    in the entire track."""
+    win = max(3, int(round(_ONSET_BASELINE_WINDOW_S * sr / hop_length)))
+    baseline = scipy.ndimage.median_filter(novelty, size=win, mode="nearest")
+    mad = scipy.ndimage.median_filter(np.abs(novelty - baseline), size=win, mode="nearest")
+    local_std = mad / 0.6745 + 1e-6  # MAD -> std-equivalent for a Gaussian-ish noise floor
+    residual = np.maximum(novelty - baseline - _ONSET_Z_THRESH * local_std, 0.0)
+
+    wait_frames = int(round(_ONSET_WAIT_S * sr / hop_length))
+    onset_frames = librosa.onset.onset_detect(
+        onset_envelope=residual,
+        sr=sr,
+        hop_length=hop_length,
+        backtrack=False,
+        normalize=False,
+        delta=1e-6,
+        wait=wait_frames,
+    )
+    return librosa.frames_to_time(onset_frames, sr=sr, hop_length=hop_length)
 
 
-def _assign_lanes(events: list[MelodyNoteEvent], lane_count: int) -> list[int]:
-    """Pitch-band lane assignment: splits notes into `lane_count` bands by pitch quantile, then
-    walks notes in time order applying a hysteresis margin around each boundary so a note near
-    the edge inherits the previous note's lane instead of flipping on noisy pitch estimation
-    alone. A chord - multiple simultaneous notes spanning more than one band - naturally lands
-    in multiple lanes at the same timestamp this way, with no special-casing needed."""
-    if lane_count <= 1:
-        return [0] * len(events)
+def _estimate_offsets(
+    S: np.ndarray, sr: int, onset_times: np.ndarray, hop_length: int = _HOP_LENGTH
+) -> np.ndarray:
+    """For each onset, walk frame-wise spectral energy (total STFT power, in dB) forward until it
+    decays `_OFFSET_DECAY_DB` below the level at onset, the next onset starts, or
+    `_OFFSET_MAX_DUR_S` elapses - whichever comes first. Shares the same STFT `S` as onset
+    detection instead of a separate time-domain RMS signal path."""
+    energy_db = librosa.power_to_db(np.sum(S**2, axis=0), ref=np.max)
+    times = librosa.frames_to_time(np.arange(len(energy_db)), sr=sr, hop_length=hop_length)
 
-    order = sorted(range(len(events)), key=lambda i: events[i].start_time)
-    boundaries = _lane_boundaries([events[i].pitch for i in order], lane_count)
+    n = len(onset_times)
+    offsets = np.empty(n)
+    for i, t_on in enumerate(onset_times):
+        start_frame = min(np.searchsorted(times, t_on), len(energy_db) - 1)
+        peak_db = energy_db[start_frame]
+        threshold_db = peak_db - _OFFSET_DECAY_DB
+        next_onset = onset_times[i + 1] if i + 1 < n else times[-1]
+        hard_cap = min(t_on + _OFFSET_MAX_DUR_S, next_onset, times[-1])
 
-    lanes = [0] * len(events)
-    prev_lane: int | None = None
-    for i in order:
-        pitch = events[i].pitch
-        band = bisect.bisect_left(boundaries, pitch)
-        near_boundary = any(abs(pitch - boundary) <= _LANE_HYSTERESIS_SEMITONES for boundary in boundaries)
-        lane = prev_lane if prev_lane is not None and near_boundary else band
-        lanes[i] = lane
-        prev_lane = lane
-    return lanes
-
-
-def _suppress_by_window(
-    events: list[MelodyNoteEvent], lanes: list[int], salience: list[float], window_seconds: float
-) -> list[int]:
-    """Within each (lane, time window) bucket, keep only the most salient note's index - caps
-    density per lane while letting different lanes independently keep simultaneous notes."""
-    best_index_by_bucket: dict[tuple[int, int], int] = {}
-    for i, event in enumerate(events):
-        bucket = (lanes[i], int(event.start_time // window_seconds))
-        current = best_index_by_bucket.get(bucket)
-        if current is None or salience[i] > salience[current]:
-            best_index_by_bucket[bucket] = i
-    return sorted(best_index_by_bucket.values(), key=lambda i: events[i].start_time)
+        end_time = hard_cap
+        for f in range(start_frame, len(energy_db)):
+            t = times[f]
+            if t >= hard_cap:
+                break
+            if energy_db[f] < threshold_db:
+                end_time = max(t, t_on + _OFFSET_MIN_DUR_S)
+                break
+        offsets[i] = min(end_time, hard_cap)
+    return offsets
 
 
-def _clamp_hold_gaps(events: list[MelodyNoteEvent], kept: list[int], lanes: list[int]) -> dict[int, float]:
-    """Shortens a held note's end time when it runs past (or too close to) the start of the next
-    note in the same lane, leaving `_MIN_LANE_GAP_S` free to release and catch that next note.
-    Only ever pulls a note's end time earlier, floored at its own start - onset times and lane
-    assignment (the actual clustering) are untouched, so this can't undo what `_assign_lanes` or
-    `_suppress_by_window` decided, only trim how long a hold visually/mechanically lasts."""
-    end_times = {i: events[i].end_time for i in kept}
-
-    by_lane: dict[int, list[int]] = {}
-    for i in kept:
-        by_lane.setdefault(lanes[i], []).append(i)
-
-    for lane_indices in by_lane.values():
-        lane_indices.sort(key=lambda i: events[i].start_time)
-        for current, following in zip(lane_indices, lane_indices[1:], strict=False):
-            max_end = events[following].start_time - _MIN_LANE_GAP_S
-            end_times[current] = max(events[current].start_time, min(end_times[current], max_end))
-
-    return end_times
+def _onset_strengths(
+    flux: np.ndarray, sr: int, onset_times: np.ndarray, hop_length: int = _HOP_LENGTH
+) -> np.ndarray:
+    """Normalized (0-1) spectral-flux value at each onset frame, for use as a per-note energy
+    hint - the melody equivalent of `KickOnseter.strength_at`."""
+    if len(flux) == 0 or len(onset_times) == 0:
+        return np.zeros(len(onset_times))
+    peak = float(np.max(flux))
+    if peak <= 0:
+        return np.zeros(len(onset_times))
+    frames = np.clip(np.round(onset_times * sr / hop_length).astype(int), 0, len(flux) - 1)
+    return np.clip(flux[frames] / peak, 0.0, 1.0)
 
 
-def build_melody_notes(note_events: list[MelodyNoteEvent], lane_count: int, bpm: float) -> list[Note]:
-    """Turn basic-pitch's transcribed note events into lane-assigned notes.
+def _spectral_centroid_lanes(
+    y: np.ndarray,
+    sr: int,
+    onset_times: np.ndarray,
+    offsets: np.ndarray,
+    lane_count: int,
+    hop_length: int = _HOP_LENGTH,
+) -> np.ndarray:
+    """Bucket each note into a lane by averaging spectral centroid (brightness) over its span,
+    then quantile-banding the results into `lane_count` equal-sized bands (lowest/darkest
+    centroid in lane 0) - lane density stays balanced regardless of where the track's timbre
+    sits, the same banding strategy pitch-based lane assignment used, minus the pitch."""
+    cent = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop_length)[0]
+    times = librosa.frames_to_time(np.arange(len(cent)), sr=sr, hop_length=hop_length)
 
-    Lanes are pitch bands rather than round-robin order (see `_assign_lanes`), and density is
-    capped per lane per beat-aligned window (see `_suppress_by_window`) using each note's
-    salience - amplitude scaled by held duration - so the busiest, noisiest transcription still
-    collapses to a tappable rhythm without losing legitimate chords (simultaneous notes in
-    different bands survive independently). A held note that would still run into the next
-    note in the same lane after all that has its end trimmed by `_clamp_hold_gaps`.
+    note_centroids = np.empty(len(onset_times))
+    for i, (t_on, t_off) in enumerate(zip(onset_times, offsets, strict=True)):
+        mask = (times >= t_on) & (times < max(t_off, t_on + 0.05))
+        if np.any(mask):
+            note_centroids[i] = np.mean(cent[mask])
+        else:
+            idx = min(np.searchsorted(times, t_on), len(cent) - 1)
+            note_centroids[i] = cent[idx]
+
+    quantile_edges = np.quantile(note_centroids, np.linspace(0, 1, lane_count + 1))
+    quantile_edges[0] -= 1.0
+    return np.digitize(note_centroids, quantile_edges[1:-1])
+
+def calculate_melody_combo(duration: int, bpm: int) -> int:
+    """Calculate the combo for melody notes based on the duration and BPM of the song."""
+    beats = (duration) // (bpm)
+    return max(1, int(beats))
+
+def build_melody_notes(y: np.ndarray, sr: int, bpm: int, lane_count: int) -> list[Note]:
+    """Turn a melody stem's audio directly into lane-assigned notes: spectral-flux onset
+    detection (`_pick_onsets`) finds note starts, energy decay from each onset estimates its end
+    (`_estimate_offsets`), and spectral-centroid quantile banding (`_spectral_centroid_lanes`)
+    assigns lanes by timbre rather than a pitch transcription.
     """
-    if not note_events:
+    S = np.abs(librosa.stft(y, n_fft=_N_FFT, hop_length=_HOP_LENGTH))
+    flux = _spectral_flux(S)
+    onset_times = _pick_onsets(flux, sr, hop_length=_HOP_LENGTH)
+    if len(onset_times) == 0:
         return []
 
-    lanes = _assign_lanes(note_events, lane_count)
-    salience = [_salience(event) for event in note_events]
-    window_seconds = (60.0 / bpm) / _SUPPRESSION_WINDOW_BEAT_FRACTION
-    kept = _suppress_by_window(note_events, lanes, salience, window_seconds)
-    end_times = _clamp_hold_gaps(note_events, kept, lanes)
+    offsets = _estimate_offsets(S, sr, onset_times, hop_length=_HOP_LENGTH)
+    lanes = _spectral_centroid_lanes(y, sr, onset_times, offsets, lane_count, hop_length=_HOP_LENGTH)
+    energies = _onset_strengths(flux, sr, onset_times, hop_length=_HOP_LENGTH)
 
     return [
-        Note(
-            time=round(note_events[i].start_time * 1000),
-            duration=round((end_times[i] - note_events[i].start_time) * 1000),
-            lane=lanes[i],
-            energy=note_events[i].amplitude,
-            note_type=NoteType.MELODY,
-        )
-        for i in kept
+        build_melody_note(onset_time, offset, lane, energy, bpm)
+        for onset_time, offset, lane, energy in zip(onset_times, offsets, lanes, energies, strict=True)
     ]
+
+def build_melody_note(onset_time: float, offset: float, lane: float, energy: float, bpm: int) -> Note:
+    duration = round((offset - onset_time) * 1000)
+    return Note(
+            time=round(onset_time * 1000),
+            duration=duration,
+            lane=int(lane),
+            energy=float(energy),
+            note_type=NoteType.MELODY,
+            combo=calculate_melody_combo(duration, bpm)
+        )

@@ -24,6 +24,7 @@ export MONGODB_URI="mongodb://localhost:27017"
 export REDIS_URL="redis://localhost:6379"
 export MINIO_ENDPOINT_URL="http://localhost:9000"
 export MAPS_STORAGE_PUBLIC_BASE_URL="http://localhost:8080"
+export MAX_UPLOAD_SIZE_MB=100
 
 echo "running migrations..."
 uv run python -m migrations.runner

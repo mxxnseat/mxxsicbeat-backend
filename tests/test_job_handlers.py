@@ -1,14 +1,12 @@
-from pathlib import Path
-
+import numpy as np
 import pytest
 from bson import ObjectId
 from pydantic import ValidationError
 
 from app.domains.maps.dsp.kick_onseter import KickOnseter
-from app.domains.maps.dsp.melody_extractor import ExtractedMelody, MelodyNoteEvent
 from app.domains.maps.dsp.stem_separator import SeparatedStems
 from app.domains.maps.dtos.internal import NewBeatmap
-from app.domains.maps.dtos.notes import NoteGroup
+from app.domains.maps.dtos.notes import Note, NoteGroup, NoteType
 from app.domains.maps.jobs.handlers import kick_handler as kick_handler_module
 from app.domains.maps.jobs.handlers import melody_handler as melody_handler_module
 from app.domains.maps.jobs.handlers import stem_handler as stem_handler_module
@@ -18,6 +16,7 @@ from app.domains.maps.jobs.handlers.melody_handler import MelodyHandler
 from app.domains.maps.jobs.handlers.stem_handler import StemHandler
 from app.domains.maps.repositories.repository import MapRepository
 from app.domains.maps.services.job_service import MapJobService
+from app.domains.maps.services.notes_service import calculate_melody_combo
 
 
 class FakeJob:
@@ -136,8 +135,8 @@ async def test_kick_handler_downloads_drum_stem_and_returns_notes(
 
     assert result == {
         "notes": [
-            {"time": 0, "lane": 0, "energy": 0.0, "note_type": "drum", "duration": None},
-            {"time": 500, "lane": 1, "energy": 0.0, "note_type": "drum", "duration": None},
+            {"time": 0, "lane": 0, "energy": 0.0, "note_type": "drum", "duration": None, "combo": 1},
+            {"time": 500, "lane": 1, "energy": 0.0, "note_type": "drum", "duration": None, "combo": 1},
         ]
     }
 
@@ -213,12 +212,10 @@ async def test_melody_handler_downloads_melody_stem_and_returns_notes(
 ):
     job_id = await _insert_job(fake_db)
     fake_storage.objects[fake_storage.melody_key(job_id)] = b"fake-melody-bytes"
-
-    canned = ExtractedMelody(
-        note_events=[MelodyNoteEvent(start_time=0.0, end_time=0.5, pitch=60, amplitude=0.8)],
-        midi_path=Path("unused.mid"),
-    )
-    monkeypatch.setattr(melody_handler_module, "extract_melody", lambda *args, **kwargs: canned)
+    note_combo = calculate_melody_combo(500, 120)
+    canned_note = Note(time=0, lane=0, energy=0.8, note_type=NoteType.MELODY, duration=500, combo=note_combo)
+    monkeypatch.setattr(melody_handler_module.librosa, "load", lambda *args, **kwargs: (np.zeros(100), 22050))
+    monkeypatch.setattr(melody_handler_module, "build_melody_notes", lambda y, sr, bpm, lane_count: [canned_note])
 
     handler = MelodyHandler(job_service, fake_storage)
     job = FakeJob({"job_id": job_id, "lane_count": 2, "bpm": 120.0})
@@ -227,7 +224,7 @@ async def test_melody_handler_downloads_melody_stem_and_returns_notes(
 
     assert result == {
         "notes": [
-            {"time": 0, "lane": 0, "energy": 0.8, "note_type": "melody", "duration": 500},
+            {"time": 0, "lane": 0, "energy": 0.8, "note_type": "melody", "duration": 500, "combo": note_combo},
         ]
     }
 
@@ -261,13 +258,12 @@ async def test_beatmap_handler_merges_kick_child_and_finalizes(fake_db, job_serv
     beatmap = await fake_db.beatmaps.find_one({"_id": ObjectId(result["beatmap_id"])})
     assert beatmap["title"] == "song.mp3"
     assert beatmap["object_key"] == "audio/x/song.mp3"
-    assert beatmap["lane_count"] == 2
     assert beatmap["duration"] == 5000
     assert beatmap["bpm"] == 120.0
     assert beatmap["notes"] == [
         {
             "lane_count": 2,
-            "notes": [{"time": 100, "lane": 0, "energy": 0.9, "note_type": "drum", "duration": None}],
+            "notes": [{"time": 100, "lane": 0, "energy": 0.9, "note_type": "drum", "duration": None, "combo": 1}],
         },
         {"lane_count": 2, "notes": []},
     ]
@@ -300,7 +296,6 @@ async def test_map_job_service_finalize_beatmap(fake_db, job_service):
         job_id=job_id,
         object_key="audio/x/song.mp3",
         title="song.mp3",
-        lane_count=2,
         duration=1000,
         bpm=None,
         notes=(NoteGroup(lane_count=2, notes=[]), NoteGroup(lane_count=2, notes=[])),

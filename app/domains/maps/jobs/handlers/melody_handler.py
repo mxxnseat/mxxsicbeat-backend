@@ -2,6 +2,7 @@ import asyncio
 import tempfile
 from pathlib import Path
 
+import librosa
 from bullmq import Job
 
 from app.common.worker_runtime import WorkerRuntime
@@ -10,7 +11,6 @@ from app.core.db import create_mongo_client, get_database
 from app.core.logging import configure_logging, get_logger
 from app.core.storage import Storage
 from app.domains.maps.configs.storage import get_maps_storage_config
-from app.domains.maps.dsp.melody_extractor import extract_melody
 from app.domains.maps.jobs.queues.queue import (
     MELODY_EXTRACTION_QUEUE_NAME,
     ExtractMelodyJobPayload,
@@ -26,9 +26,9 @@ logger = get_logger(__name__)
 
 class MelodyHandler:
     """BullMQ job processor: downloads the melody stem stem_handler already separated out
-    (drums and vocals removed) and runs basic-pitch transcription against it, returning the
-    resulting notes - the parent `beatmap_handler` reads this back via `job.getChildrenValues()`
-    once this and `kick_handler` have both completed.
+    (drums and vocals removed) and runs onset + spectral-centroid-lane detection directly
+    against it, returning the resulting notes - the parent `beatmap_handler` reads this back via
+    `job.getChildrenValues()` once this and `kick_handler` have both completed.
     """
 
     def __init__(self, job_service: MapJobService, maps_storage: MapsStorage) -> None:
@@ -50,15 +50,14 @@ class MelodyHandler:
         logger.info("melody_handler.processing", job_id=payload.job_id)
 
         with tempfile.TemporaryDirectory(prefix="mxxsicbeat-melody-") as tmp:
-            work_dir = Path(tmp)
-            melody_stem_path = work_dir / "melody.wav"
+            melody_stem_path = Path(tmp) / "melody.wav"
             await self._maps_storage.download(
                 self._maps_storage.melody_key(payload.job_id), melody_stem_path
             )
 
-            result = await asyncio.to_thread(extract_melody, melody_stem_path, work_dir, payload.bpm)
+            y, sr = await asyncio.to_thread(librosa.load, melody_stem_path, sr=None, mono=True)
 
-        notes = build_melody_notes(result.note_events, payload.lane_count, payload.bpm)
+        notes = build_melody_notes(y, int(sr), payload.bpm, payload.lane_count)
 
         logger.info("melody_handler.completed", job_id=payload.job_id)
         return MelodyExtractionResult(notes=notes).model_dump()

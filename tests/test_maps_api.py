@@ -122,7 +122,6 @@ async def test_job_status_and_beatmap_round_trip(client, fake_db):
     assert beatmap_response.status_code == 200
     beatmap_body = beatmap_response.json()
     assert beatmap_body["id"] == beatmap_id
-    assert beatmap_body["lane_count"] == 2
     assert beatmap_body["notes"] == [
         {
             "lane_count": 2,

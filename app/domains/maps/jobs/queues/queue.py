@@ -64,7 +64,7 @@ class ExtractMelodyJobPayload(BaseModel):
 
     job_id: str
     lane_count: int
-    bpm: float
+    bpm: int
 
 
 class KickDetectionResult(BaseModel):

@@ -19,6 +19,7 @@ class Note(BaseModel):
     energy: float
     note_type: NoteType
     duration: int | None = None
+    combo: int = 1
 
 
 class NoteGroup(BaseModel):
