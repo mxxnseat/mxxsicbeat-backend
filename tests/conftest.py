@@ -10,6 +10,8 @@ from app.domains.maps.configs.storage import MapsStorageConfig, get_maps_storage
 from app.domains.maps.jobs.queues.queue import get_flow_producer
 from app.domains.maps.services.storage import get_maps_storage
 from app.main import create_app
+from tests.fixtures.beatmaps import make_beatmap_doc
+from tests.fixtures.notes import make_note, make_note_group
 
 
 class FakeStorage:
@@ -92,3 +94,18 @@ async def client(fake_db, fake_storage, fake_flow_producer, test_config, test_ma
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as async_client:
         yield async_client
+
+
+@pytest.fixture
+def note_factory():
+    return make_note
+
+
+@pytest.fixture
+def note_group_factory():
+    return make_note_group
+
+
+@pytest.fixture
+def beatmap_factory():
+    return make_beatmap_doc

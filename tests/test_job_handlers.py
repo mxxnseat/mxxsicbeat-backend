@@ -111,7 +111,7 @@ async def test_stem_handler_marks_failed_and_reraises_on_error(
 
 
 async def test_kick_handler_downloads_drum_stem_and_returns_notes(
-    fake_db, fake_storage, job_service, monkeypatch
+    fake_db, fake_storage, job_service, monkeypatch, note_factory
 ):
     job_id = await _insert_job(fake_db)
     fake_storage.objects[fake_storage.drum_key(job_id)] = b"fake-drum-bytes"
@@ -135,8 +135,8 @@ async def test_kick_handler_downloads_drum_stem_and_returns_notes(
 
     assert result == {
         "notes": [
-            {"time": 0, "lane": 0, "energy": 0.0, "note_type": "drum", "duration": None, "combo": 1},
-            {"time": 500, "lane": 1, "energy": 0.0, "note_type": "drum", "duration": None, "combo": 1},
+            note_factory(time=0, lane=0, energy=0.0),
+            note_factory(time=500, lane=1, energy=0.0),
         ]
     }
 
@@ -208,7 +208,7 @@ async def test_melody_handler_marks_failed_on_invalid_payload(fake_db, fake_stor
 
 
 async def test_melody_handler_downloads_melody_stem_and_returns_notes(
-    fake_db, fake_storage, job_service, monkeypatch
+    fake_db, fake_storage, job_service, monkeypatch, note_factory
 ):
     job_id = await _insert_job(fake_db)
     fake_storage.objects[fake_storage.melody_key(job_id)] = b"fake-melody-bytes"
@@ -224,12 +224,14 @@ async def test_melody_handler_downloads_melody_stem_and_returns_notes(
 
     assert result == {
         "notes": [
-            {"time": 0, "lane": 0, "energy": 0.8, "note_type": "melody", "duration": 500, "combo": note_combo},
+            note_factory(time=0, lane=0, energy=0.8, note_type="melody", duration=500, combo=note_combo),
         ]
     }
 
 
-async def test_beatmap_handler_merges_kick_child_and_finalizes(fake_db, job_service):
+async def test_beatmap_handler_merges_kick_child_and_finalizes(
+    fake_db, job_service, note_factory, note_group_factory
+):
     job_id = await _insert_job(fake_db)
     handler = BeatmapHandler(job_service)
     job = FakeJob(
@@ -261,11 +263,8 @@ async def test_beatmap_handler_merges_kick_child_and_finalizes(fake_db, job_serv
     assert beatmap["duration"] == 5000
     assert beatmap["bpm"] == 120.0
     assert beatmap["notes"] == [
-        {
-            "lane_count": 2,
-            "notes": [{"time": 100, "lane": 0, "energy": 0.9, "note_type": "drum", "duration": None, "combo": 1}],
-        },
-        {"lane_count": 2, "notes": []},
+        note_group_factory(notes=[note_factory(time=100, lane=0, energy=0.9)]),
+        note_group_factory(),
     ]
 
 

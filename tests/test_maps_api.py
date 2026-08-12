@@ -75,7 +75,9 @@ async def test_get_beatmap_not_found(client):
     assert response.json()["code"] == "beatmap_not_found"
 
 
-async def test_job_status_and_beatmap_round_trip(client, fake_db):
+async def test_job_status_and_beatmap_round_trip(
+    client, fake_db, beatmap_factory, note_factory, note_group_factory
+):
     now = datetime.now(UTC)
     job_result = await fake_db.map_jobs.insert_one(
         {
@@ -89,22 +91,12 @@ async def test_job_status_and_beatmap_round_trip(client, fake_db):
             "updated_at": now,
         }
     )
+    notes = [
+        note_group_factory(notes=[note_factory(time=1000, lane=0, energy=0.5)]),
+        note_group_factory(),
+    ]
     beatmap_result = await fake_db.beatmaps.insert_one(
-        {
-            "job_id": str(job_result.inserted_id),
-            "title": "song.mp3",
-            "lane_count": 2,
-            "duration": 180000,
-            "bpm": None,
-            "notes": [
-                {
-                    "lane_count": 2,
-                    "notes": [{"time": 1000, "lane": 0, "energy": 0.5, "duration": None, "note_type": "drum"}],
-                },
-                {"lane_count": 2, "notes": []},
-            ],
-            "created_at": now,
-        }
+        beatmap_factory(job_id=str(job_result.inserted_id), created_at=now, notes=notes)
     )
     beatmap_id = str(beatmap_result.inserted_id)
     await fake_db.map_jobs.update_one({"_id": job_result.inserted_id}, {"$set": {"beatmap_id": beatmap_id}})
@@ -122,31 +114,17 @@ async def test_job_status_and_beatmap_round_trip(client, fake_db):
     assert beatmap_response.status_code == 200
     beatmap_body = beatmap_response.json()
     assert beatmap_body["id"] == beatmap_id
-    assert beatmap_body["notes"] == [
-        {
-            "lane_count": 2,
-            "notes": [{"time": 1000, "lane": 0, "energy": 0.5, "duration": None, "note_type": "drum"}],
-        },
-        {"lane_count": 2, "notes": []},
-    ]
+    assert beatmap_body["notes"] == notes
     # no MINIO_PUBLIC_BASE_URL configured in test_config, so no CDN URL to hand back
     assert beatmap_body["audio_url"] is None
 
 
-async def test_get_beatmap_returns_audio_url_when_cdn_configured(client, fake_db, test_maps_storage_config):
+async def test_get_beatmap_returns_audio_url_when_cdn_configured(
+    client, fake_db, test_maps_storage_config, beatmap_factory
+):
     test_maps_storage_config.public_base_url = "https://cdn.example.com"
-    now = datetime.now(UTC)
     beatmap_result = await fake_db.beatmaps.insert_one(
-        {
-            "job_id": "job-1",
-            "object_key": "job-1/original/song.mp3",
-            "title": "song.mp3",
-            "lane_count": 2,
-            "duration": 180000,
-            "bpm": None,
-            "notes": [{"lane_count": 2, "notes": []}, {"lane_count": 2, "notes": []}],
-            "created_at": now,
-        }
+        beatmap_factory(job_id="job-1", object_key="job-1/original/song.mp3")
     )
 
     response = await client.get(f"/api/v1/maps/{beatmap_result.inserted_id}")
@@ -155,28 +133,16 @@ async def test_get_beatmap_returns_audio_url_when_cdn_configured(client, fake_db
     assert response.json()["audio_url"] == "https://cdn.example.com/job-1/original/song.mp3"
 
 
-async def test_list_beatmaps_returns_newest_first(client, fake_db):
+async def test_list_beatmaps_returns_newest_first(client, fake_db, beatmap_factory):
     older = await fake_db.beatmaps.insert_one(
-        {
-            "job_id": "job-1",
-            "title": "older.mp3",
-            "lane_count": 2,
-            "duration": 100000,
-            "bpm": None,
-            "notes": [{"lane_count": 2, "notes": []}, {"lane_count": 2, "notes": []}],
-            "created_at": datetime(2026, 1, 1, tzinfo=UTC),
-        }
+        beatmap_factory(
+            job_id="job-1", title="older.mp3", duration=100000, created_at=datetime(2026, 1, 1, tzinfo=UTC)
+        )
     )
     newer = await fake_db.beatmaps.insert_one(
-        {
-            "job_id": "job-2",
-            "title": "newer.mp3",
-            "lane_count": 2,
-            "duration": 200000,
-            "bpm": None,
-            "notes": [{"lane_count": 2, "notes": []}, {"lane_count": 2, "notes": []}],
-            "created_at": datetime(2026, 2, 1, tzinfo=UTC),
-        }
+        beatmap_factory(
+            job_id="job-2", title="newer.mp3", duration=200000, created_at=datetime(2026, 2, 1, tzinfo=UTC)
+        )
     )
 
     response = await client.get("/api/v1/maps")

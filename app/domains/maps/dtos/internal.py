@@ -16,5 +16,5 @@ class NewBeatmap:
     object_key: str
     title: str
     duration: int
-    bpm: float | None
+    bpm: int | None
     notes: tuple[NoteGroup, NoteGroup]

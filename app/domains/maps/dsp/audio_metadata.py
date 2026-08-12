@@ -8,7 +8,7 @@ def track_duration(audio_path: Path) -> int:
     return round(duration_seconds * 1000)
 
 
-def detect_bpm(audio_path: Path) -> float:
+def detect_bpm(audio_path: Path) -> int:
     signal, sample_rate = librosa.load(audio_path)
     tempo, _ = librosa.beat.beat_track(y=signal, sr=sample_rate)
-    return tempo.item()
+    return round(tempo.item())

@@ -12,6 +12,7 @@ class BeatmapNote(BaseModel):
     time: int
     lane: int
     energy: float
+    combo: int
     duration: int | None
     note_type: NoteType
 
@@ -25,7 +26,7 @@ class Beatmap(BaseModel):
     id: str
     title: str
     duration: int
-    bpm: float | None = None
+    bpm: int | None = None
     notes: tuple[BeatmapNoteGroup, BeatmapNoteGroup]
     created_at: datetime
     audio_url: str | None = None

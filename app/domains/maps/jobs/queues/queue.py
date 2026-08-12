@@ -42,7 +42,7 @@ class OrchestrateBeatmapJobPayload(BaseModel):
     original_filename: str
     lane_count: int
     duration: int
-    bpm: float
+    bpm: int
 
 
 class DetectKickOnsetsJobPayload(BaseModel):
@@ -102,7 +102,7 @@ def build_separate_stems_job(
 
 
 def build_generate_beatmap_flow(
-    *, job_id: str, object_key: str, original_filename: str, lane_count: int, duration: int, bpm: float
+    *, job_id: str, object_key: str, original_filename: str, lane_count: int, duration: int, bpm: int
 ) -> dict:
     """Builds the second-phase BullMQ Flow tree, added by stem_handler once the drum/melody
     stems are already in storage (and duration/bpm already detected from the original mix): a
