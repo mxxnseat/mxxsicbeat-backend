@@ -12,6 +12,7 @@ from app.domains.maps.services.notes_service import (
     _spectral_flux,
     build_drum_notes,
     build_melody_notes,
+    calculate_melody_combo,
 )
 
 _SR = 22050
@@ -130,9 +131,11 @@ def test_pick_onsets_ignores_flat_novelty():
     assert len(onset_times) == 0
 
 
+_N_BINS = 1 + 2048 // 2
+
+
 def test_estimate_offsets_ends_when_energy_decays_below_threshold():
-    n_bins, n_frames = 8, 40
-    S = np.full((n_bins, n_frames), 5.0)
+    S = np.full((_N_BINS, 40), 5.0)
     S[:, 10:] = 0.01
 
     offsets = _estimate_offsets(S, _SR, np.array([0.0]), hop_length=_HOP_LENGTH)
@@ -142,13 +145,22 @@ def test_estimate_offsets_ends_when_energy_decays_below_threshold():
 
 
 def test_estimate_offsets_caps_at_next_onset():
-    n_bins, n_frames = 8, 100
-    S = np.full((n_bins, n_frames), 5.0)
+    S = np.full((_N_BINS, 100), 5.0)
 
     onset_times = np.array([0.0, 0.3])
     offsets = _estimate_offsets(S, _SR, onset_times, hop_length=_HOP_LENGTH)
 
     assert offsets[0] == pytest.approx(0.3, abs=0.02)
+
+
+def test_estimate_offsets_follows_onset_bands_through_a_sustained_bed():
+    pad = _sine(180.0, 1.0)
+    note = np.concatenate([_tone(3000.0, 0.2), np.zeros(int(_SR * 0.8))])
+    S = np.abs(librosa.stft(pad + note, n_fft=2048, hop_length=_HOP_LENGTH))
+
+    offsets = _estimate_offsets(S, _SR, np.array([0.0]), hop_length=_HOP_LENGTH)
+
+    assert offsets[0] == pytest.approx(0.2, abs=0.08)
 
 
 def test_onset_strengths_normalizes_against_peak_flux():
@@ -213,3 +225,12 @@ def test_build_melody_notes_returns_empty_list_for_silence():
     y = np.zeros(_SR)
 
     assert build_melody_notes(y, _SR, 120, lane_count=2) == []
+
+
+def test_calculate_melody_combo_counts_beats_spanned_by_the_hold():
+    assert calculate_melody_combo(duration=2000, bpm=120) == 4
+    assert calculate_melody_combo(duration=500, bpm=120) == 1
+
+
+def test_calculate_melody_combo_floors_short_holds_at_one():
+    assert calculate_melody_combo(duration=60, bpm=128) == 1
