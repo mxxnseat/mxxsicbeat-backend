@@ -19,9 +19,7 @@ def separate_stems(audio_path: Path, work_dir: Path) -> SeparatedStems:
     drum_stem_dir = _demucs_two_stems("drums", audio_path, work_dir)
     no_drums_path = drum_stem_dir / "no_drums.wav"
 
-    melody_stem_dir = _demucs_two_stems("vocals", no_drums_path, work_dir)
-
     return SeparatedStems(
         drum_stem_path=drum_stem_dir / "drums.wav",
-        melody_stem_path=melody_stem_dir / "no_vocals.wav",
+        melody_stem_path=no_drums_path,
     )
