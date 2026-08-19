@@ -5,11 +5,16 @@ import pytest
 from app.domains.maps.dsp.kick_onseter import KickOnseter
 from app.domains.maps.dtos.notes import NoteType
 from app.domains.maps.services.notes_service import (
+    _ONSET_MIN_NOVELTY,
     _estimate_offsets,
+    _normalize_level,
     _onset_strengths,
+    _onset_threshold,
     _pick_onsets,
+    _quarter_tone_filterbank,
     _spectral_centroid_lanes,
     _spectral_flux,
+    _superflux,
     build_drum_notes,
     build_melody_notes,
     calculate_melody_combo,
@@ -17,6 +22,7 @@ from app.domains.maps.services.notes_service import (
 
 _SR = 22050
 _HOP_LENGTH = 512
+_N_BINS = 1 + 2048 // 2
 
 
 def _onseter_with_odf(odf: list[float], hop_length: int = 512, sample_rate: int = 44100) -> KickOnseter:
@@ -112,6 +118,127 @@ def test_spectral_flux_spikes_on_energy_jump():
     assert flux[4] == 0.0
 
 
+def _vibrato(
+    freq: float, duration: float, depth_semitones: float, rate_hz: float, sr: int = _SR
+) -> np.ndarray:
+    """A steady tone whose pitch wobbles - constant amplitude, so no real onsets."""
+    t = np.linspace(0, duration, int(sr * duration), endpoint=False)
+    deviation = 2.0 ** (depth_semitones / 12.0) - 1.0
+    phase = 2 * np.pi * freq * (t + deviation / (2 * np.pi * rate_hz) * np.sin(2 * np.pi * rate_hz * t))
+    return 0.8 * np.sin(phase)
+
+
+def _magnitude_stft(y: np.ndarray) -> np.ndarray:
+    return np.abs(librosa.stft(y, n_fft=2048, hop_length=_HOP_LENGTH))
+
+
+def test_quarter_tone_filterbank_matches_the_paper_band_count():
+    filterbank = _quarter_tone_filterbank(44100, 2048)
+
+    assert filterbank.shape == (1 + 2048 // 2, 138)
+
+
+def test_quarter_tone_filterbank_leaves_filters_unnormalized():
+    filterbank = _quarter_tone_filterbank(44100, 2048)
+
+    assert np.allclose(filterbank.max(axis=0), 1.0)
+    assert filterbank.sum(axis=0).max() > filterbank.sum(axis=0).min() + 1.0
+
+
+def test_superflux_is_zero_when_energy_is_constant():
+    S = np.full((_N_BINS, 20), 2.0)
+
+    assert np.allclose(_superflux(S, _SR), 0.0)
+
+
+def test_superflux_spikes_on_energy_jump():
+    S = np.ones((_N_BINS, 20))
+    S[:, 10:] = 20.0
+
+    flux = _superflux(S, _SR)
+
+    assert flux[10] > 0.0
+    assert flux[5] == 0.0
+    assert flux[15] == 0.0
+
+
+def test_superflux_suppresses_vibrato_that_spectral_flux_reports():
+    """The paper's core claim: pitch wobble at a steady volume is not an onset."""
+    S = _magnitude_stft(_vibrato(880.0, 2.0, depth_semitones=1.0, rate_hz=6.0))
+
+    plain = _spectral_flux(S)
+    superflux = _superflux(S, _SR)
+
+    assert np.max(plain) > 0.0
+    assert np.max(superflux) < np.max(plain) / 10
+
+
+def test_superflux_still_reports_a_real_onset_after_vibrato():
+    vibrato = _vibrato(880.0, 1.0, depth_semitones=1.0, rate_hz=6.0)
+    attack = _tone(1760.0, 0.5)
+    S = _magnitude_stft(np.concatenate([vibrato, attack]))
+
+    flux = _superflux(S, _SR)
+    attack_frame = int(1.0 * _SR / _HOP_LENGTH)
+
+    assert np.max(flux[attack_frame - 2 : attack_frame + 6]) > 5 * np.max(flux[: attack_frame - 5])
+
+
+def test_normalize_level_scales_to_a_fixed_reference():
+    y = _tone(440.0, 1.0, amplitude=0.2)
+
+    normalized = _normalize_level(y)
+
+    assert normalized is not None
+    assert np.quantile(np.abs(normalized), 0.999) == pytest.approx(1.0)
+
+
+def test_normalize_level_ignores_a_lone_click():
+    """One stray full-scale sample must not become the ruler for the whole track."""
+    y = _tone(440.0, 1.0, amplitude=0.2)
+    clicked = y.copy()
+    clicked[100] = 1.0
+
+    clean = _normalize_level(y)
+    with_click = _normalize_level(clicked)
+
+    assert clean is not None and with_click is not None
+    assert np.allclose(clean[200:], with_click[200:], rtol=0.02)
+
+
+def test_normalize_level_treats_near_silence_as_empty():
+    assert _normalize_level(np.zeros(_SR)) is None
+    assert _normalize_level(_tone(440.0, 1.0, amplitude=1e-6)) is None
+
+
+def test_onset_threshold_never_drops_below_the_absolute_floor():
+    quiet_ripple = np.full(200, 0.01)
+    quiet_ripple[50] = 0.05
+
+    threshold = _onset_threshold(quiet_ripple, _SR, hop_length=_HOP_LENGTH)
+
+    assert np.all(threshold >= _ONSET_MIN_NOVELTY)
+
+
+def test_build_melody_notes_is_unchanged_by_track_gain():
+    silence = np.zeros(int(_SR * 0.1))
+    y = np.concatenate([_tone(220.0, 0.3), silence, _tone(1760.0, 0.3), silence])
+
+    quiet = build_melody_notes(y * 0.05, _SR, 120, lane_count=2)
+    loud = build_melody_notes(y * 4.0, _SR, 120, lane_count=2)
+
+    assert len(quiet) > 0
+    assert [note.time for note in quiet] == [note.time for note in loud]
+    assert [note.lane for note in quiet] == [note.lane for note in loud]
+
+
+def test_build_melody_notes_ignores_a_silent_stem_with_dither_noise():
+    rng = np.random.default_rng(0)
+    near_silence = rng.normal(0.0, 1e-6, _SR)
+
+    assert build_melody_notes(near_silence, _SR, 120, lane_count=2) == []
+
+
 def test_pick_onsets_detects_impulses_above_local_noise_floor():
     novelty = np.zeros(200)
     novelty[50] = 5.0
@@ -129,9 +256,6 @@ def test_pick_onsets_ignores_flat_novelty():
     onset_times = _pick_onsets(novelty, _SR, hop_length=_HOP_LENGTH)
 
     assert len(onset_times) == 0
-
-
-_N_BINS = 1 + 2048 // 2
 
 
 def test_estimate_offsets_ends_when_energy_decays_below_threshold():

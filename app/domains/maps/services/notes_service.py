@@ -1,3 +1,5 @@
+from functools import lru_cache
+
 import librosa
 import numpy as np
 import scipy.ndimage
@@ -9,9 +11,33 @@ _HOP_LENGTH = 512
 _N_FFT = 2048
 _MS_PER_MINUTE = 60_000
 
+# SuperFlux (Böck & Widmer, DAFx-13), equation numbers below refer to the paper:
+# https://www.dafx.de/paper-archive/2013/papers/09.dafx2013_submission_12.pdf
+_SUPERFLUX_BANDS_PER_OCTAVE = 24
+_SUPERFLUX_FMIN = 27.5
+_SUPERFLUX_FMAX = 16000.0
+_SUPERFLUX_MAX_FILTER_BANDS = 3
+_SUPERFLUX_WINDOW_RATIO = 0.5
+
 _ONSET_BASELINE_WINDOW_S = 0.5
 _ONSET_Z_THRESH = 2.5
-_ONSET_WAIT_S = 0.1
+# Section 2.3's combination_width: two attacks closer together than this are one onset.
+_ONSET_WAIT_S = 0.03
+
+# Level every stem is scaled to before the novelty is measured, so that the absolute
+# threshold below means the same thing on a quiet track as on a loud one. The reference is
+# a high quantile rather than the peak: one click or pop would otherwise become the ruler
+# and shrink every real onset underneath the threshold. Stems quieter than the silence
+# level are treated as empty rather than amplified into their own noise floor.
+_ONSET_NORMALIZE_QUANTILE = 0.999
+_ONSET_SILENCE_LEVEL = 1e-4
+
+# The floor under the local threshold, in units of `_superflux`'s summed log10 rise over
+# the filterbank - so it is only meaningful on normalized audio, and has to be re-derived
+# if the filterbank or n_fft changes. Chosen at the geometric center of the range that
+# scored perfectly on the golden track, leaving ~2.5x of room on either side before either
+# decay ripple gets in or quiet notes drop out.
+_ONSET_MIN_NOVELTY = 3.0
 
 _OFFSET_DECAY_DB = 15.0
 _OFFSET_MIN_DUR_S = 0.05
@@ -42,12 +68,100 @@ def _spectral_flux(S: np.ndarray) -> np.ndarray:
     return np.sum(np.maximum(diff, 0.0), axis=0)
 
 
-def _pick_onsets(novelty: np.ndarray, sr: int, hop_length: int = _HOP_LENGTH) -> np.ndarray:
+@lru_cache(maxsize=4)
+def _quarter_tone_filterbank(sr: int, n_fft: int) -> np.ndarray:
+    """F(k, m) of equation 4: triangular filters a quarter-tone apart, 27.5...16000 Hz.
+
+    On a logarithmic frequency scale a semitone is always the same number of bands wide, so
+    the max filter below searches a constant range whatever the pitch. Filters are left
+    unnormalized (section 2.1 ii), and ones whose centers collapse onto the same FFT bin -
+    everything under ~735 Hz at 44.1 kHz, where a quarter-tone is narrower than a bin - are
+    dropped instead of duplicated.
+    """
+    fmax = min(_SUPERFLUX_FMAX, sr / 2)
+    band_count = int(np.floor(np.log2(fmax / _SUPERFLUX_FMIN) * _SUPERFLUX_BANDS_PER_OCTAVE)) + 1
+    centers = _SUPERFLUX_FMIN * 2.0 ** (np.arange(band_count) / _SUPERFLUX_BANDS_PER_OCTAVE)
+
+    bins = np.unique(np.round(centers * n_fft / sr).astype(int))
+    n_bins = n_fft // 2 + 1
+    bins = bins[(bins > 0) & (bins < n_bins - 1)]
+    if len(bins) < 3:
+        return np.zeros((n_bins, 0))
+
+    filterbank = np.zeros((n_bins, len(bins) - 2))
+    for band, (left, center, right) in enumerate(
+        zip(bins[:-2], bins[1:-1], bins[2:], strict=True)
+    ):
+        filterbank[left : center + 1, band] = np.linspace(0.0, 1.0, center - left + 1)
+        filterbank[center : right + 1, band] = np.linspace(1.0, 0.0, right - center + 1)
+    return filterbank
+
+
+def _frame_lag(n_fft: int, hop_length: int) -> int:
+    """mu of equation 2: how many frames back the difference reaches.
+
+    Neighbouring frames overlap so heavily that their difference is mostly noise, so the
+    comparison is made against a frame far enough back that the two windows barely overlap.
+    """
+    window = librosa.filters.get_window("hann", n_fft)
+    above_ratio = np.flatnonzero(window > _SUPERFLUX_WINDOW_RATIO)
+    if len(above_ratio) == 0:
+        return 1
+    return max(1, int(np.floor((n_fft / 2 - above_ratio[0]) / hop_length + 0.5)))
+
+
+def _superflux(S: np.ndarray, sr: int, hop_length: int = _HOP_LENGTH) -> np.ndarray:
+    """SF* of equation 6 - spectral flux with maximum-filter trajectory tracking.
+
+    Drop-in replacement for `_spectral_flux`: same magnitude spectrogram in, same per-frame
+    novelty out. The difference is taken against a frequency-widened copy of an earlier
+    frame, so energy that only wobbles in frequency - vibrato, or the drifting partials of a
+    decaying string - falls inside the widened band and cancels instead of reading as a new
+    onset.
+    """
+    n_fft = 2 * (S.shape[0] - 1)
+    filterbank = _quarter_tone_filterbank(sr, n_fft)
+    if filterbank.shape[1] == 0:
+        return np.zeros(S.shape[1])
+
+    # Equation 4. Filtering first and taking the log afterwards - and adding 1 before the
+    # log - keeps the curve near-linear at low magnitudes, so the ripple of a decaying tail
+    # stays small instead of being blown up the way a plain dB scale blows it up.
+    spectrogram = np.log10(filterbank.T @ S + 1.0)
+
+    mu = _frame_lag(n_fft, hop_length)
+    if spectrogram.shape[1] <= mu:
+        return np.zeros(S.shape[1])
+
+    # Equation 5: widen each band over its direct neighbours, within that frame only.
+    maximum_filtered = scipy.ndimage.maximum_filter1d(
+        spectrogram, size=_SUPERFLUX_MAX_FILTER_BANDS, axis=0, mode="nearest"
+    )
+    difference = spectrogram[:, mu:] - maximum_filtered[:, :-mu]
+    flux = np.sum(np.maximum(difference, 0.0), axis=0)
+    return np.concatenate([np.zeros(mu), flux])
+
+
+def _normalize_level(y: np.ndarray) -> np.ndarray | None:
+    reference = float(np.quantile(np.abs(y), _ONSET_NORMALIZE_QUANTILE))
+    if reference < _ONSET_SILENCE_LEVEL:
+        return None
+    return y / reference
+
+
+def _onset_threshold(novelty: np.ndarray, sr: int, hop_length: int = _HOP_LENGTH) -> np.ndarray:
     win = max(3, int(round(_ONSET_BASELINE_WINDOW_S * sr / hop_length)))
     baseline = scipy.ndimage.median_filter(novelty, size=win, mode="nearest")
     mad = scipy.ndimage.median_filter(np.abs(novelty - baseline), size=win, mode="nearest")
     local_std = mad / 0.6745 + 1e-6
-    residual = np.maximum(novelty - baseline - _ONSET_Z_THRESH * local_std, 0.0)
+    # The local threshold follows the novelty down into quiet passages, so the ripple of a
+    # decaying tail still clears it - it only ever asks an onset to stand out from its
+    # neighbours. The absolute floor is the part a decaying tail cannot reach.
+    return np.maximum(baseline + _ONSET_Z_THRESH * local_std, _ONSET_MIN_NOVELTY)
+
+def _pick_onsets(novelty: np.ndarray, sr: int, hop_length: int = _HOP_LENGTH) -> np.ndarray:
+    threshold = _onset_threshold(novelty, sr, hop_length)
+    residual = np.maximum(novelty - threshold, 0.0)
 
     wait_frames = int(round(_ONSET_WAIT_S * sr / hop_length))
     onset_frames = librosa.onset.onset_detect(
@@ -145,14 +259,20 @@ def calculate_melody_combo(duration: int, bpm: int) -> int:
     return max(1, int(beats))
 
 def build_melody_notes(y: np.ndarray, sr: int, bpm: int, lane_count: int) -> list[Note]:
-    S = np.abs(librosa.stft(y, n_fft=_N_FFT, hop_length=_HOP_LENGTH))
-    flux = _spectral_flux(S)
+    signal = _normalize_level(y)
+    if signal is None:
+        return []
+
+    S = np.abs(librosa.stft(signal, n_fft=_N_FFT, hop_length=_HOP_LENGTH))
+    flux = _superflux(S, sr, hop_length=_HOP_LENGTH)
     onset_times = _pick_onsets(flux, sr, hop_length=_HOP_LENGTH)
     if len(onset_times) == 0:
         return []
 
     offsets = _estimate_offsets(S, sr, onset_times, hop_length=_HOP_LENGTH)
-    lanes = _spectral_centroid_lanes(y, sr, onset_times, offsets, lane_count, hop_length=_HOP_LENGTH)
+    lanes = _spectral_centroid_lanes(
+        signal, sr, onset_times, offsets, lane_count, hop_length=_HOP_LENGTH
+    )
     energies = _onset_strengths(flux, sr, onset_times, hop_length=_HOP_LENGTH)
 
     return [
