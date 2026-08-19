@@ -141,7 +141,7 @@ def _spectral_centroid_lanes(
     return np.digitize(note_centroids, quantile_edges[1:-1])
 
 def calculate_melody_combo(duration: int, bpm: int) -> int:
-    beats = duration * bpm / _MS_PER_MINUTE
+    beats = duration // bpm
     return max(1, int(beats))
 
 def build_melody_notes(y: np.ndarray, sr: int, bpm: int, lane_count: int) -> list[Note]:

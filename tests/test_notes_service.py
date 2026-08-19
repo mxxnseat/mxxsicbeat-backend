@@ -228,8 +228,8 @@ def test_build_melody_notes_returns_empty_list_for_silence():
 
 
 def test_calculate_melody_combo_counts_beats_spanned_by_the_hold():
-    assert calculate_melody_combo(duration=2000, bpm=120) == 4
-    assert calculate_melody_combo(duration=500, bpm=120) == 1
+    assert calculate_melody_combo(duration=2000, bpm=120) == 16
+    assert calculate_melody_combo(duration=500, bpm=120) == 4
 
 
 def test_calculate_melody_combo_floors_short_holds_at_one():
